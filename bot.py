@@ -23,7 +23,7 @@ def load_protocol():
         return None
 
 def analyze_screenshot(image_bytes: bytes, protocol_text: str) -> str:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
     image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
     system_prompt = f"""You are a sports betting analyst bot. You have been given a protocol document that contains all the rules for analyzing soccer betting screenshots.

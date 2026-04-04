@@ -22,9 +22,18 @@ def load_protocol():
         logger.error(f"Error loading protocol: {e}")
         return None
 
+def detect_media_type(image_bytes: bytes) -> str:
+    if image_bytes[:3] == b'\xff\xd8\xff':
+        return "image/jpeg"
+    elif image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    else:
+        return "image/jpeg"
+
 def analyze_screenshot(image_bytes: bytes, protocol_text: str) -> str:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    media_type = detect_media_type(image_bytes)
 
     system_prompt = f"""You are a sports betting analyst bot. You have been given a protocol document that contains all the rules for analyzing soccer betting screenshots.
 
@@ -51,7 +60,7 @@ Be precise with numbers. Calculate outlier gaps exactly. Do not skip any section
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/png",
+                            "media_type": media_type,
                             "data": image_b64,
                         },
                     },
@@ -69,18 +78,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📥 Screenshot ricevuto. Carico il protocollo e analizzo...")
 
     try:
-        # Download photo
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
 
-        # Load protocol
         protocol = load_protocol()
         if not protocol:
             await update.message.reply_text("❌ Errore nel caricamento del protocollo. Riprova tra poco.")
             return
 
-        # Analyze
         result = analyze_screenshot(bytes(image_bytes), protocol)
         await update.message.reply_text(result)
 

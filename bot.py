@@ -13,7 +13,6 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 PROTOCOL_URL = "https://raw.githubusercontent.com/mpetti1979/soccer-protocols/refs/heads/main/soccer_model_protocol.html"
 
-# Buffer per raccogliere screenshot per utente
 user_images = {}
 
 def load_protocol():
@@ -33,6 +32,22 @@ def detect_media_type(image_bytes: bytes) -> str:
     else:
         return "image/jpeg"
 
+def split_message(text: str, max_length: int = 4000) -> list:
+    """Spezza il testo in chunk da max_length caratteri senza tagliare a metà riga."""
+    if len(text) <= max_length:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
+        split_at = text.rfind('\n', 0, max_length)
+        if split_at == -1:
+            split_at = max_length
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip('\n')
+    return chunks
+
 def analyze_screenshots(images: list, protocol_text: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -47,11 +62,11 @@ Your job:
 3. Combine data from all sources for a complete analysis
 4. Apply ALL rules from the protocol mechanically
 5. Respond ONLY in Italian using the exact output format defined in Section 11 of the protocol
+6. ALWAYS append the VERDICT block from Section 12 at the very end — this is mandatory
 
-If multiple screenshots are provided, integrate data from all of them.
-Be precise with numbers. Calculate outlier gaps exactly. Do not skip any section of the output format."""
+Be precise with numbers. Calculate outlier gaps exactly. Do not skip any section of the output format.
+The VERDICT block is the most important part — never omit it."""
 
-    # Costruisci il contenuto con tutte le immagini
     content = []
     for i, img_bytes in enumerate(images):
         image_b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
@@ -67,35 +82,38 @@ Be precise with numbers. Calculate outlier gaps exactly. Do not skip any section
 
     content.append({
         "type": "text",
-        "text": f"Analizza {'questi ' + str(len(images)) + ' screenshot' if len(images) > 1 else 'questo screenshot'} applicando il protocollo. Integra i dati di tutte le fonti disponibili. Rispondi in italiano con il formato esatto definito nella Section 11."
+        "text": f"Analizza {'questi ' + str(len(images)) + ' screenshot' if len(images) > 1 else 'questo screenshot'} applicando il protocollo. Integra i dati di tutte le fonti. Rispondi in italiano con il formato Section 11 e concludi SEMPRE con il VERDICT block della Section 12."
     })
 
     message = client.messages.create(
         model="claude-opus-4-5",
-        max_tokens=1500,
+        max_tokens=2500,
         system=system_prompt,
         messages=[{"role": "user", "content": content}],
     )
     return message.content[0].text
 
+async def send_long_message(update: Update, text: str):
+    """Invia un messaggio lungo spezzandolo se necessario."""
+    chunks = split_message(text)
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-
-    # Inizializza buffer utente
     if user_id not in user_images:
         user_images[user_id] = []
 
-    # Scarica foto
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
     user_images[user_id].append(bytes(image_bytes))
 
     count = len(user_images[user_id])
-    await update.message.reply_text(
-        f"📥 Screenshot {count} ricevuto.\n\n"
-        f"{'Mandane altri o scrivi *analizza* per procedere.' if count == 1 else f'Hai {count} screenshot in coda. Scrivi *analizza* per procedere o manda altri screenshot.'}"
-    )
+    if count == 1:
+        await update.message.reply_text("📥 Screenshot 1 ricevuto.\n\nManda altri screenshot oppure scrivi *analizza* per procedere.")
+    else:
+        await update.message.reply_text(f"📥 Screenshot {count} ricevuto.\n\nScrivi *analizza* per procedere o manda altri screenshot.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -116,10 +134,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             images = user_images[user_id].copy()
-            user_images[user_id] = []  # Reset buffer
+            user_images[user_id] = []
 
             result = analyze_screenshots(images, protocol)
-            await update.message.reply_text(result)
+            await send_long_message(update, result)
 
         except Exception as e:
             logger.error(f"Error: {e}")

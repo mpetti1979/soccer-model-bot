@@ -270,6 +270,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Errore: {str(e)}")
         return
 
+    # — Tennis: URL TennisExplorer —
+    if user["sport"] == "tennis" and "tennisexplorer.com" in text_lower:
+        url = text.strip()
+        if not url.startswith("http"):
+            url = "https://" + url
+        await update.message.reply_text("🔗 Recupero dati da TennisExplorer...")
+        try:
+            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            user["html_source"] = r.text
+            user["state"] = STATE_WAITING_OLS
+            await update.message.reply_text(
+                "📄 Dati TennisExplorer caricati.\n\n"
+                "Hai il dataset OLS? (quote + rank)\n\n"
+                "• Mandalo come testo nel formato: `237 153 250`\n"
+                "• Oppure scrivi *no* per procedere solo con morfologia + outlier"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Errore nel fetch URL: {str(e)}")
+        return
+
     # — Tennis: testo lungo = HTML TennisExplorer o dataset OLS —
     if user["sport"] == "tennis" and len(text) > 100:
         # Testo lungo → capire se è HTML o dataset OLS

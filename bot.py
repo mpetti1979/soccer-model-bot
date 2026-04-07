@@ -198,44 +198,45 @@ def parse_analysis_for_db(analysis_text: str) -> dict:
 
     def find(patterns, text, default="nd"):
         for p in patterns:
-            m = re.search(p, text, re.IGNORECASE)
+            m = re.search(p, text, re.IGNORECASE | re.DOTALL)
             if m:
-                return m.group(1).strip()
+                try:
+                    return m.group(1).strip()
+                except IndexError:
+                    return m.group(0).strip()
         return default
 
+    def find_plain(pattern, text, default="nd"):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(0).strip() if m else default
+
     data["torneo"] = find([r"🎾\s*(.+?)\s*—", r"Torneo[:\s]+(.+?)[\n|]"], analysis_text)
-    data["sup"] = find([r"Clay|Hard|Grass|Erba|Terra"], analysis_text)
-    data["fav"] = find([r"FAV[:\s]+([A-Za-z\s\.]+?)[@\n]", r"👤\s*FAV[:\s]+([A-Za-z\s\.]+?)@"], analysis_text)
-    data["und"] = find([r"UND[:\s]+([A-Za-z\s\.]+?)[@\n]", r"👤\s*UND[:\s]+([A-Za-z\s\.]+?)@"], analysis_text)
+    data["sup"] = find_plain(r"\b(Clay|Hard|Grass|Erba|Terra battuta)\b", analysis_text)
+    data["fav"] = find([r"👤\s*\*?FAV\*?[:\s]+([A-Za-z][A-Za-z\s\.]+?)\s*@",
+                         r"FAV[:\s]+([A-Za-z][A-Za-z\s\.]+?)\s*@"], analysis_text)
+    data["und"] = find([r"👤\s*\*?UND\*?[:\s]+([A-Za-z][A-Za-z\s\.]+?)\s*@",
+                         r"UND[:\s]+([A-Za-z][A-Za-z\s\.]+?)\s*@"], analysis_text)
     data["q_fav"] = find([r"FAV[^\n]+@\s*([\d\.]+)", r"Q_FAV[:\s]+([\d\.]+)"], analysis_text)
     data["q_und"] = find([r"UND[^\n]+@\s*([\d\.]+)", r"Q_UND[:\s]+([\d\.]+)"], analysis_text)
     data["r2"] = find([r"R²[:\s]+([\d\.]+)", r"R2[:\s]+([\d\.]+)"], analysis_text)
     data["delta_pct"] = find([r"Δ%[:\s]+([-\d\.]+)%?", r"Delta%[:\s]+([-\d\.]+)"], analysis_text)
-    data["fascia"] = find([r"Fascia[:\s]+(forte|mod|debole|sub|non op)"], analysis_text)
-    data["morf"] = find([r"Tipo[:\s]+\*?\*?([A-Z]{1,2})\*?\*?", r"Morfologia.*?Tipo[:\s]+([A-Z]{1,2})"], analysis_text)
+    data["fascia"] = find([r"Fascia[:\s]+(forte|mod|debole|sub|non\s*op)"], analysis_text)
+    data["morf"] = find([r"Tipo[:\s]+\*?\*?([A-Z]{1,2})\b"], analysis_text)
 
-    outl_und_raw = find([r"Outl_UND[:\s]+\*?\*?(SI|nd)\*?\*?"], analysis_text)
-    outl_fav_raw = find([r"Outl_FAV[:\s]+\*?\*?(SI|nd)\*?\*?"], analysis_text)
-    data["outl_und"] = outl_und_raw.upper() if outl_und_raw != "nd" else "nd"
-    data["outl_fav"] = outl_fav_raw.upper() if outl_fav_raw != "nd" else "nd"
+    outl_und_raw = find([r"Outl_UND[:\s|]+\*?\*?(SI|nd)\b"], analysis_text)
+    outl_fav_raw = find([r"Outl_FAV[:\s|]+\*?\*?(SI|nd)\b"], analysis_text)
+    data["outl_und"] = "SI" if str(outl_und_raw).upper() == "SI" else "nd"
+    data["outl_fav"] = "SI" if str(outl_fav_raw).upper() == "SI" else "nd"
 
-    # Segnale morfologia (pro_fav = True se PRO FAV, False se PRO UND, None se EV/nd)
-    morf_sig = find([r"Segnale empirico[:\s]+\*?\*?(PRO FAV|PRO UND|EV|nd)\*?\*?"], analysis_text)
-    if "FAV" in morf_sig.upper():
-        data["morf_pro_fav"] = True
-    elif "UND" in morf_sig.upper():
-        data["morf_pro_fav"] = False
-    else:
-        data["morf_pro_fav"] = None
+    morf_sig = find([r"Segnale empirico[:\s]+\*?\*?(PRO FAV|PRO UND|EV|nd)\b"], analysis_text)
+    data["morf_pro_fav"] = True if "FAV" in str(morf_sig).upper() and "UND" not in str(morf_sig).upper() else (
+        False if "UND" in str(morf_sig).upper() else None
+    )
 
-    # Segnale modello
-    mod_sig = find([r"Modello[^\n]*?(PRO FAV|PRO UND|nd)"], analysis_text)
-    if "FAV" in mod_sig.upper():
-        data["mod_pro_fav"] = True
-    elif "UND" in mod_sig.upper():
-        data["mod_pro_fav"] = False
-    else:
-        data["mod_pro_fav"] = None
+    mod_sig = find([r"Modello[^\n]{0,30}?(PRO FAV|PRO UND|nd)\b"], analysis_text)
+    data["mod_pro_fav"] = True if "FAV" in str(mod_sig).upper() and "UND" not in str(mod_sig).upper() else (
+        False if "UND" in str(mod_sig).upper() else None
+    )
 
     data["modello_segnale"] = mod_sig
     data["data"] = datetime.now().strftime("%d/%m")

@@ -109,7 +109,7 @@ def extract_tennis_data(html: str) -> str:
         odds_section = html[odds_start:odds_start+60000]
     return (
         "=== MATCH INFO (torneo, giocatori, ranking, nazionalita) ===\n" +
-        header +
+        html[:5000] +
         "\n\n=== BETTING ODDS SECTION (tutti i bookmaker con storico quote) ===\n" +
         odds_section
     )

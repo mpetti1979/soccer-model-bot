@@ -97,7 +97,7 @@ def analyze_screenshots(user: dict, protocol_text: str, sport: str) -> str:
 
         html_info = ""
         if user["html_source"]:
-            html_info = f"\n\nTENNISEXPLORER HTML SOURCE (use instead of screenshot for odds data):\n{user['html_source'][:8000]}"
+            html_info = f"\n\nTENNISEXPLORER HTML SOURCE (use instead of screenshot for odds data):\n{user['html_source'][:40000]}"
 
         instruction = (
             "Analizza i dati tennis applicando il protocollo LBA. "

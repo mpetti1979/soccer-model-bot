@@ -97,7 +97,7 @@ def analyze_screenshots(user: dict, protocol_text: str, sport: str) -> str:
 
         html_info = ""
         if user["html_source"]:
-            html_info = f"\n\nTENNISEXPLORER HTML SOURCE (use instead of screenshot for odds data):\n{user['html_source'][:40000]}"
+            html_info = f"\n\nTENNISEXPLORER HTML SOURCE (use instead of screenshot for odds data):\n{user['html_source']}"
 
         instruction = (
             "Analizza i dati tennis applicando il protocollo LBA. "
@@ -137,7 +137,7 @@ Be precise with numbers. Never skip any section. The VERDICT is the most importa
 
     message = client.messages.create(
         model="claude-opus-4-5",
-        max_tokens=2500,
+        max_tokens=4000,
         system=system_prompt,
         messages=[{"role": "user", "content": content}],
     )

@@ -85,6 +85,35 @@ def is_command(text: str) -> bool:
     commands = {"soccer", "tennis", "ippica", "analizza", "reset", "no", "skip"}
     return text.strip().lower() in commands
 
+def extract_tennis_data(html: str) -> str:
+    """Estrae intestazione match + sezione betting odds dal HTML di TennisExplorer."""
+    # BLOCCO 1: intestazione — torneo, giocatori, ranking, nazionalita
+    header = html[:3000]
+    # BLOCCO 2: sezione betting odds — cerca "Betting odds" come marker
+    betting_markers = ["Betting odds", "Home/Away ("]
+    odds_start = -1
+    for marker in betting_markers:
+        idx = html.find(marker)
+        if idx > 0:
+            odds_start = max(0, idx - 100)
+            break
+    if odds_start == -1:
+        for marker in ["bet365", "Pinnacle", "10Bet"]:
+            idx = html.find(marker)
+            if idx > 0:
+                odds_start = max(0, idx - 200)
+                break
+    if odds_start == -1:
+        odds_section = html[3000:18000]
+    else:
+        odds_section = html[odds_start:odds_start+60000]
+    return (
+        "=== MATCH INFO (torneo, giocatori, ranking, nazionalita) ===\n" +
+        header +
+        "\n\n=== BETTING ODDS SECTION (tutti i bookmaker con storico quote) ===\n" +
+        odds_section
+    )
+
 def analyze_screenshots(user: dict, protocol_text: str, sport: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -97,7 +126,7 @@ def analyze_screenshots(user: dict, protocol_text: str, sport: str) -> str:
 
         html_info = ""
         if user["html_source"]:
-            html_info = f"\n\nTENNISEXPLORER HTML SOURCE (use instead of screenshot for odds data):\n{user['html_source']}"
+            html_info = f"\n\nTENNISEXPLORER BETTING ODDS DATA (extracted):\n{extract_tennis_data(user['html_source'])}"
 
         instruction = (
             "Analizza i dati tennis applicando il protocollo LBA. "

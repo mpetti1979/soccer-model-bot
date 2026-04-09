@@ -84,14 +84,15 @@ def split_message(text: str, max_length: int = 4000) -> list:
 
 def parse_tennis_html(raw_html: str) -> str:
     """
-    Estrae dall'HTML TennisExplorer solo le sezioni rilevanti:
-    - Info match (titolo, torneo, superficie)
-    - Betting odds (Home/Away)
+    Estrae dall'HTML TennisExplorer e produce output strutturato leggibile:
+    - Info match
+    - Quote attuali tutti bookmaker (k1=giocatore1, k2=giocatore2)
+    - Storico Pinnacle completo
     - Latest matches
-    Riduce il file da ~750KB a ~10KB.
     """
     try:
         from bs4 import BeautifulSoup
+        import re
         soup = BeautifulSoup(raw_html, 'html.parser')
         out = []
 
@@ -100,21 +101,75 @@ def parse_tennis_html(raw_html: str) -> str:
         if title:
             out.append('MATCH: ' + title.get_text(strip=True))
 
-        # 2. Info torneo/superficie dai meta o div
+        # 2. Info torneo/data/superficie
         for div in soup.find_all(['div', 'p', 'td'], class_=['date', 'course', 'box-row', 'match-info']):
             t = div.get_text(separator=' ', strip=True)
-            if t:
+            if t and len(t) < 200:
                 out.append(t)
 
-        # 3. Betting odds Home/Away
+        # 3. Betting odds strutturati
         odds_div = soup.find('div', {'id': 'oddsMenu-1-data'})
         if odds_div:
-            out.append('\n--- BETTING ODDS ---')
             rows = odds_div.find_all('tr')
-            for row in rows:
-                t = row.get_text(separator=' ', strip=True)
-                if t:
-                    out.append(t)
+
+            # Nomi giocatori dall'header
+            players = ['K1', 'K2']
+            if rows:
+                header = rows[0]
+                p = [td.get_text(strip=True) for td in header.find_all('td', class_=['k1', 'k2'])]
+                if len(p) >= 2:
+                    players = p
+
+            out.append(f'\n--- QUOTE ATTUALI ---')
+            out.append(f'{"Bookmaker":<15} {players[0]:<8} {players[1]:<8}')
+            out.append('-' * 35)
+
+            pinnacle_history_k1 = []
+            pinnacle_history_k2 = []
+
+            for row in rows[1:]:
+                first = row.find('td', class_='first')
+                if not first:
+                    continue
+                bname = first.get_text(strip=True)
+                k1_td = row.find('td', class_='k1')
+                k2_td = row.find('td', class_='k2')
+                if not k1_td or not k2_td:
+                    continue
+
+                k1_text = k1_td.get_text(separator=' ', strip=True)
+                k2_text = k2_td.get_text(separator=' ', strip=True)
+
+                # Quota attuale = primo numero float trovato
+                k1_nums = re.findall(r'\b(\d+\.\d{2})\b', k1_text)
+                k2_nums = re.findall(r'\b(\d+\.\d{2})\b', k2_text)
+                k1_current = k1_nums[0] if k1_nums else 'nd'
+                k2_current = k2_nums[0] if k2_nums else 'nd'
+
+                out.append(f'{bname:<15} {k1_current:<8} {k2_current:<8}')
+
+                # Storico completo Pinnacle con timestamp
+                if bname.lower() == 'pinnacle':
+                    timestamps_k1 = re.findall(r'(\d{2}\.\d{2}\. \d{2}:\d{2})\s+(\d+\.\d{2})', k1_text)
+                    timestamps_k2 = re.findall(r'(\d{2}\.\d{2}\. \d{2}:\d{2})\s+(\d+\.\d{2})', k2_text)
+                    opening_k1 = re.findall(r'Opening odds\s+[\d.]+\s+[\d.]+\s+([\d.]+)', k1_text)
+                    opening_k2 = re.findall(r'Opening odds\s+[\d.]+\s+[\d.]+\s+([\d.]+)', k2_text)
+                    pinnacle_history_k1 = timestamps_k1
+                    pinnacle_history_k2 = timestamps_k2
+
+            # Storico Pinnacle
+            if pinnacle_history_k1 or pinnacle_history_k2:
+                out.append(f'\n--- STORICO PINNACLE ---')
+                out.append(f'{"Timestamp":<20} {players[0]:<8} {players[1]:<8}')
+                out.append('-' * 40)
+                # Unisci per timestamp
+                k1_map = {t: v for t, v in pinnacle_history_k1}
+                k2_map = {t: v for t, v in pinnacle_history_k2}
+                all_times = sorted(set(list(k1_map.keys()) + list(k2_map.keys())), reverse=True)
+                for ts in all_times:
+                    v1 = k1_map.get(ts, 'nd')
+                    v2 = k2_map.get(ts, 'nd')
+                    out.append(f'{ts:<20} {v1:<8} {v2:<8}')
 
         # 4. Latest matches
         for h in soup.find_all(['h2', 'h3']):
@@ -122,13 +177,19 @@ def parse_tennis_html(raw_html: str) -> str:
             if 'last match' in ht or 'latest' in ht or 'recent' in ht:
                 out.append('\n--- LATEST MATCHES ---')
                 sibling = h.find_next_sibling()
-                while sibling:
-                    out.append(sibling.get_text(separator=' ', strip=True))
+                count = 0
+                while sibling and count < 10:
+                    t = sibling.get_text(separator=' ', strip=True)
+                    if t:
+                        out.append(t)
+                        count += 1
                     sibling = sibling.find_next_sibling()
                     if sibling and sibling.name in ['h2', 'h3']:
                         break
+                break
 
         return '\n'.join(out)
+
     except Exception as e:
         logger.error(f"parse_tennis_html error: {e}")
         return raw_html[:12000]

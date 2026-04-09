@@ -461,7 +461,7 @@ Regole critiche:
 - Rispondi SEMPRE in italiano"""
 
     message = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-haiku-4-5-20251001",
         max_tokens=3000,
         system=system_prompt,
         messages=[{"role": "user", "content": content}],
@@ -533,7 +533,7 @@ Be precise with numbers. Never skip any section."""
     content.append({"type": "text", "text": instruction})
 
     message = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-haiku-4-5-20251001",
         max_tokens=2500,
         system=system_prompt,
         messages=[{"role": "user", "content": content}],

@@ -82,6 +82,57 @@ def split_message(text: str, max_length: int = 4000) -> list:
         text = text[split_at:].lstrip('\n')
     return chunks
 
+def parse_tennis_html(raw_html: str) -> str:
+    """
+    Estrae dall'HTML TennisExplorer solo le sezioni rilevanti:
+    - Info match (titolo, torneo, superficie)
+    - Betting odds (Home/Away)
+    - Latest matches
+    Riduce il file da ~750KB a ~10KB.
+    """
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(raw_html, 'html.parser')
+        out = []
+
+        # 1. Titolo match
+        title = soup.find('h1')
+        if title:
+            out.append('MATCH: ' + title.get_text(strip=True))
+
+        # 2. Info torneo/superficie dai meta o div
+        for div in soup.find_all(['div', 'p', 'td'], class_=['date', 'course', 'box-row', 'match-info']):
+            t = div.get_text(separator=' ', strip=True)
+            if t:
+                out.append(t)
+
+        # 3. Betting odds Home/Away
+        odds_div = soup.find('div', {'id': 'oddsMenu-1-data'})
+        if odds_div:
+            out.append('\n--- BETTING ODDS ---')
+            rows = odds_div.find_all('tr')
+            for row in rows:
+                t = row.get_text(separator=' ', strip=True)
+                if t:
+                    out.append(t)
+
+        # 4. Latest matches
+        for h in soup.find_all(['h2', 'h3']):
+            ht = h.get_text().lower()
+            if 'last match' in ht or 'latest' in ht or 'recent' in ht:
+                out.append('\n--- LATEST MATCHES ---')
+                sibling = h.find_next_sibling()
+                while sibling:
+                    out.append(sibling.get_text(separator=' ', strip=True))
+                    sibling = sibling.find_next_sibling()
+                    if sibling and sibling.name in ['h2', 'h3']:
+                        break
+
+        return '\n'.join(out)
+    except Exception as e:
+        logger.error(f"parse_tennis_html error: {e}")
+        return raw_html[:12000]
+
 def is_ols_format(text: str) -> bool:
     """Rileva se il testo è nel nuovo formato OLS con fav:/und:/avversari passati."""
     text_lower = text.lower()
@@ -588,7 +639,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user["sport"] == "tennis" and ext in ("html", "htm", "txt"):
         file = await context.bot.get_file(doc.file_id)
         file_bytes = await file.download_as_bytearray()
-        user["html_source"] = file_bytes.decode("utf-8", errors="ignore")
+        raw_html = file_bytes.decode("utf-8", errors="ignore")
+        # Estrai solo sezioni rilevanti per ridurre dimensione
+        if ext in ("html", "htm"):
+            user["html_source"] = parse_tennis_html(raw_html)
+        else:
+            user["html_source"] = raw_html[:12000]
         user["state"] = STATE_WAITING_OLS
         await update.message.reply_text(
             f"📄 File *{filename}* caricato.\n\n"

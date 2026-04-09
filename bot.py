@@ -570,6 +570,33 @@ OLS_FORMAT_HELP = (
     "Oppure scrivi *no* per procedere senza OLS."
 )
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user = get_user(user_id)
+
+    if not user["sport"]:
+        await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    filename = doc.file_name or ""
+    ext = filename.lower().split(".")[-1] if "." in filename else ""
+
+    if user["sport"] == "tennis" and ext in ("html", "htm", "txt"):
+        file = await context.bot.get_file(doc.file_id)
+        file_bytes = await file.download_as_bytearray()
+        user["html_source"] = file_bytes.decode("utf-8", errors="ignore")
+        user["state"] = STATE_WAITING_OLS
+        await update.message.reply_text(
+            f"📄 File *{filename}* caricato.\n\n"
+            + OLS_FORMAT_HELP
+        )
+    else:
+        await update.message.reply_text("⚠️ Formato non supportato. Allega un file .html o .txt con le quote.")
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user = get_user(user_id)
@@ -620,7 +647,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sport_emoji = "⚽" if text_lower == "soccer" else "🎾"
         await update.message.reply_text(
             f"{sport_emoji} Sport selezionato: *{text_lower.upper()}*\n\n"
-            f"{'Manda URL TennisExplorer o screenshot AsianOdds.' if text_lower == 'tennis' else 'Manda uno o più screenshot e poi scrivi *analizza*.'}"
+            f"{'Allega il file .html o .txt con le quote (TennisExplorer o simili).' if text_lower == 'tennis' else 'Manda uno o più screenshot e poi scrivi *analizza*.'}"
         )
         return
 
@@ -697,25 +724,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Errore: {str(e)}")
         return
 
-    # — Tennis: URL TennisExplorer —
-    if user["sport"] == "tennis" and "tennisexplorer.com" in text_lower:
-        url = text.strip()
-        if not url.startswith("http"):
-            url = "https://" + url
-        await update.message.reply_text("🔗 Recupero dati da TennisExplorer...")
-        try:
-            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            user["html_source"] = r.text
-            user["state"] = STATE_WAITING_OLS
-            await update.message.reply_text(
-                "📄 Dati TennisExplorer caricati.\n\n"
-                + OLS_FORMAT_HELP
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Errore nel fetch URL: {str(e)}")
-        return
-
     # — Tennis: nuovo formato OLS (fav: / und: / avversari passati:) —
     if user["sport"] == "tennis" and user["state"] == STATE_WAITING_OLS and is_ols_format(text):
         user["ols_dataset"] = text
@@ -746,6 +754,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT, handle_text))
     logger.info("Bot started")

@@ -445,7 +445,7 @@ Applica la regola direzione OLS:
 
     html_info = ""
     if user["html_source"]:
-        html_info = f"\n\nTENNISEXPLORER HTML SOURCE:\n{user['html_source'][:10000]}"
+        html_info = f"\n\nTENNISEXPLORER DATA (estratto pulito — contiene info match + betting odds completi + latest matches):\n{user['html_source'][:15000]}"
 
     instruction = f"""Analizza il match tennis applicando il protocollo LBA e il Pinnacle Workflow v1.0.
 

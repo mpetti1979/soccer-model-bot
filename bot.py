@@ -26,23 +26,27 @@ STATE_SPORT_SELECTED = "sport_selected"
 STATE_WAITING_OLS = "waiting_ols"
 STATE_READY = "ready"
 
-def get_user(context):
-    d = context.user_data
-    if "sport" not in d:
-        d["sport"] = None
-        d["images"] = []
-        d["html_source"] = None
-        d["ols_dataset"] = None
-        d["state"] = STATE_IDLE
-    return d
+USER_SESSIONS = {}
 
-def reset_user(context):
-    d = context.user_data
-    d["sport"] = None
-    d["images"] = []
-    d["html_source"] = None
-    d["ols_dataset"] = None
-    d["state"] = STATE_IDLE
+def get_user(user_id):
+    if user_id not in USER_SESSIONS:
+        USER_SESSIONS[user_id] = {
+            "sport": None,
+            "images": [],
+            "html_source": None,
+            "ols_dataset": None,
+            "state": STATE_IDLE,
+        }
+    return USER_SESSIONS[user_id]
+
+def reset_user(user_id):
+    USER_SESSIONS[user_id] = {
+        "sport": None,
+        "images": [],
+        "html_source": None,
+        "ols_dataset": None,
+        "state": STATE_IDLE,
+    }
 
 def load_protocol(sport: str) -> str:
     url = PROTOCOLS.get(sport)
@@ -561,7 +565,7 @@ OLS_FORMAT_HELP = (
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user = get_user(context)
+    user = get_user(user_id)
 
     if not user["sport"]:
         await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
@@ -579,12 +583,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = await file.download_as_bytearray()
         raw = file_bytes.decode("utf-8", errors="ignore")
         if ext in ("html", "htm"):
-            user["html_source"] = parse_tennis_html(raw)
+            parsed = parse_tennis_html(raw)
+            user["html_source"] = parsed if len(parsed) > 50 else raw[:20000]
         else:
-            user["html_source"] = raw[:15000]
+            user["html_source"] = raw[:20000]
         user["state"] = STATE_WAITING_OLS
+        html_len = len(user["html_source"]) if user["html_source"] else 0
+        logger.info(f"[DOC] user_id={user_id} html_source len={html_len} state={user['state']}")
         await update.message.reply_text(
-            f"📄 File *{filename}* caricato.\n\n" + OLS_FORMAT_HELP,
+            f"📄 File *{filename}* caricato ({html_len} chars).\n\n" + OLS_FORMAT_HELP,
             parse_mode="Markdown"
         )
     else:
@@ -592,7 +599,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user = get_user(context)
+    user = get_user(user_id)
 
     if not user["sport"]:
         await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
@@ -627,14 +634,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user = get_user(context)
+    user = get_user(user_id)
     text = update.message.text.strip()
     text_lower = text.lower()
 
     # Sport selection
     if text_lower in ("soccer", "tennis", "ippica"):
-        reset_user(context)
-        user = get_user(context)
+        reset_user(user_id)
+        user = get_user(user_id)
         user["sport"] = text_lower
         user["state"] = STATE_SPORT_SELECTED
         sport_emoji = "⚽" if text_lower == "soccer" else "🎾"
@@ -647,7 +654,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Reset
     if text_lower == "reset":
-        reset_user(context)
+        reset_user(user_id)
         await update.message.reply_text("🗑 Reset completato.\n\n" + HELP_TEXT, parse_mode="Markdown")
         return
 

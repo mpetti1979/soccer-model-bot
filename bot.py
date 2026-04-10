@@ -26,27 +26,23 @@ STATE_SPORT_SELECTED = "sport_selected"
 STATE_WAITING_OLS = "waiting_ols"
 STATE_READY = "ready"
 
-user_data = {}
+def get_user(context):
+    d = context.user_data
+    if "sport" not in d:
+        d["sport"] = None
+        d["images"] = []
+        d["html_source"] = None
+        d["ols_dataset"] = None
+        d["state"] = STATE_IDLE
+    return d
 
-def get_user(user_id):
-    if user_id not in user_data:
-        user_data[user_id] = {
-            "sport": None,
-            "images": [],
-            "html_source": None,
-            "ols_dataset": None,
-            "state": STATE_IDLE,
-        }
-    return user_data[user_id]
-
-def reset_user(user_id):
-    user_data[user_id] = {
-        "sport": None,
-        "images": [],
-        "html_source": None,
-        "ols_dataset": None,
-        "state": STATE_IDLE,
-    }
+def reset_user(context):
+    d = context.user_data
+    d["sport"] = None
+    d["images"] = []
+    d["html_source"] = None
+    d["ols_dataset"] = None
+    d["state"] = STATE_IDLE
 
 def load_protocol(sport: str) -> str:
     url = PROTOCOLS.get(sport)
@@ -565,7 +561,7 @@ OLS_FORMAT_HELP = (
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user = get_user(user_id)
+    user = get_user(context)
 
     if not user["sport"]:
         await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
@@ -596,7 +592,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user = get_user(user_id)
+    user = get_user(context)
 
     if not user["sport"]:
         await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
@@ -631,14 +627,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user = get_user(user_id)
+    user = get_user(context)
     text = update.message.text.strip()
     text_lower = text.lower()
 
     # Sport selection
     if text_lower in ("soccer", "tennis", "ippica"):
-        reset_user(user_id)
-        user = get_user(user_id)
+        reset_user(context)
+        user = get_user(context)
         user["sport"] = text_lower
         user["state"] = STATE_SPORT_SELECTED
         sport_emoji = "⚽" if text_lower == "soccer" else "🎾"
@@ -651,7 +647,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Reset
     if text_lower == "reset":
-        reset_user(user_id)
+        reset_user(context)
         await update.message.reply_text("🗑 Reset completato.\n\n" + HELP_TEXT, parse_mode="Markdown")
         return
 

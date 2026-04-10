@@ -659,8 +659,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text_lower in ("no", "skip") and user["sport"] == "tennis" and user["state"] == STATE_WAITING_OLS:
         user["ols_dataset"] = None
         user["state"] = STATE_READY
+        has_data = bool(user["images"]) or bool(user["html_source"])
         await update.message.reply_text(
-            "✅ Procedo senza OLS.\nScrivi *analizza* quando pronto.", parse_mode="Markdown"
+            f"✅ Procedo senza OLS.\n"
+            f"Dati in coda: {'✅ HTML caricato' if user['html_source'] else '❌ nessun HTML'} | "
+            f"{'✅ ' + str(len(user['images'])) + ' screenshot' if user['images'] else '❌ nessuno screenshot'}\n"
+            f"Scrivi *analizza* quando pronto.",
+            parse_mode="Markdown"
         )
         return
 

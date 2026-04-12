@@ -82,85 +82,6 @@ def split_message(text: str, max_length: int = 4000) -> list:
         text = text[split_at:].lstrip('\n')
     return chunks
 
-def parse_tennis_html(raw_html: str) -> str:
-    """Estrae quote e storico Pinnacle dall'HTML TennisExplorer."""
-    try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(raw_html, 'html.parser')
-        out = []
-
-        # Titolo match
-        title = soup.find('h1')
-        if title:
-            out.append('MATCH: ' + title.get_text(strip=True))
-
-        # Info torneo/data
-        for div in soup.find_all(['div', 'p', 'td'], class_=['date', 'course', 'box-row', 'match-info']):
-            t = div.get_text(separator=' ', strip=True)
-            if t and len(t) < 200:
-                out.append(t)
-
-        # Betting odds
-        odds_div = soup.find('div', {'id': 'oddsMenu-1-data'})
-        if odds_div:
-            rows = odds_div.find_all('tr')
-            players = ['K1', 'K2']
-            if rows:
-                header = rows[0]
-                p = [td.get_text(strip=True) for td in header.find_all('td', class_=['k1', 'k2'])]
-                if len(p) >= 2:
-                    players = p
-
-            out.append(f'\n--- QUOTE ATTUALI (K1={players[0]}, K2={players[1]}) ---')
-            out.append(f'{"Bookmaker":<15} {players[0]:<10} {players[1]:<10}')
-            out.append('-' * 40)
-
-            pinnacle_history_k1 = []
-            pinnacle_history_k2 = []
-
-            for row in rows[1:]:
-                first = row.find('td', class_='first')
-                if not first:
-                    continue
-                bname = first.get_text(strip=True)
-                k1_td = row.find('td', class_='k1')
-                k2_td = row.find('td', class_='k2')
-                if not k1_td or not k2_td:
-                    continue
-
-                k1_text = k1_td.get_text(separator=' ', strip=True)
-                k2_text = k2_td.get_text(separator=' ', strip=True)
-
-                k1_nums = re.findall(r'\b(\d+\.\d{2})\b', k1_text)
-                k2_nums = re.findall(r'\b(\d+\.\d{2})\b', k2_text)
-                k1_current = k1_nums[0] if k1_nums else 'nd'
-                k2_current = k2_nums[0] if k2_nums else 'nd'
-
-                out.append(f'{bname:<15} {k1_current:<10} {k2_current:<10}')
-
-                if 'pinnacle' in bname.lower():
-                    timestamps_k1 = re.findall(r'(\d{2}\.\d{2}\. \d{2}:\d{2})\s+([\d.]+)', k1_text)
-                    timestamps_k2 = re.findall(r'(\d{2}\.\d{2}\. \d{2}:\d{2})\s+([\d.]+)', k2_text)
-                    pinnacle_history_k1 = timestamps_k1
-                    pinnacle_history_k2 = timestamps_k2
-
-            if pinnacle_history_k1 or pinnacle_history_k2:
-                out.append(f'\n--- STORICO PINNACLE ---')
-                out.append(f'{"Timestamp":<20} {players[0]:<10} {players[1]:<10}')
-                out.append('-' * 45)
-                k1_map = {t: v for t, v in pinnacle_history_k1}
-                k2_map = {t: v for t, v in pinnacle_history_k2}
-                all_times = sorted(set(list(k1_map.keys()) + list(k2_map.keys())))
-                for ts in all_times:
-                    v1 = k1_map.get(ts, 'nd')
-                    v2 = k2_map.get(ts, 'nd')
-                    out.append(f'{ts:<20} {v1:<10} {v2:<10}')
-
-        return '\n'.join(out)
-
-    except Exception as e:
-        logger.error(f"parse_tennis_html error: {e}")
-        return raw_html[:20000]
 
 def is_ols_format(text: str) -> bool:
     text_lower = text.lower()
@@ -242,239 +163,135 @@ def run_ols(parsed_ols: dict) -> dict:
         "n_rows": n
     }
 
-def generate_pinnacle_chart_html(match_name, hist_fav, hist_und, avg_fav, avg_und, gap_fav, gap_und, fav_name, und_name):
-    """Genera HTML Chart.js con drift Pinnacle vs avg mercato."""
-
-    if gap_fav >= 0.08:
-        signal = f"⚠️ Pinnacle MAX quota su {fav_name} → segnale PRO {und_name} (gap {gap_fav:+.3f})"
-        signal_color = "#e94560"
-    elif gap_und >= 0.08:
-        signal = f"⚠️ Pinnacle MAX quota su {und_name} → segnale PRO {fav_name} (gap {gap_und:+.3f})"
-        signal_color = "#e94560"
-    elif gap_fav >= 0.05 or gap_und >= 0.05:
-        signal = f"⚠️ Zona grigia — segnale debole"
-        signal_color = "#f1a04e"
-    else:
-        signal = "✅ Pinnacle in range mercato — NO SIGNAL"
-        signal_color = "#4ecca3"
-
-    all_times = sorted(set([r["time"] for r in hist_fav] + [r["time"] for r in hist_und]))
-    fav_map = {r["time"]: r["quote"] for r in hist_fav}
-    und_map = {r["time"]: r["quote"] for r in hist_und}
-
-    fav_data = [fav_map.get(t, "null") for t in all_times]
-    und_data = [und_map.get(t, "null") for t in all_times]
-
-    labels_js = json.dumps(all_times)
-    fav_js = json.dumps(fav_data)
-    und_js = json.dumps(und_data)
-    n = len(all_times)
-
-    fav_current = hist_fav[-1]["quote"] if hist_fav else "nd"
-    und_current = hist_und[-1]["quote"] if hist_und else "nd"
-
-    from datetime import datetime
-    now = datetime.now().strftime("%d.%m.%Y · ore %H:%M")
-
-    html = f"""<!DOCTYPE html>
-<html lang="it">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pinnacle Drift — {match_name}</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f1a; color: #eee; padding: 20px; }}
-  h2 {{ color: #fff; font-size: 1.1em; margin-bottom: 4px; }}
-  .sub {{ color: #888; font-size: 0.85em; margin-bottom: 16px; }}
-  .signal {{ font-size: 0.95em; margin: 12px 0; padding: 12px 16px; background: #1a1a2e; border-left: 4px solid {signal_color}; border-radius: 4px; color: {signal_color}; }}
-  .chart-wrap {{ background: #1a1a2e; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
-  .metrics {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
-  .card {{ background: #1a1a2e; border-radius: 10px; padding: 14px; }}
-  .card .label {{ font-size: 0.75em; color: #888; margin-bottom: 4px; }}
-  .card .val {{ font-size: 1.5em; font-weight: 700; color: #fff; }}
-  .card .gap {{ font-size: 0.85em; margin-top: 4px; }}
-  .pos {{ color: #e94560; }}
-  .neg {{ color: #4ecca3; }}
-  canvas {{ max-height: 320px; }}
-</style>
-</head>
-<body>
-<h2>🎾 {match_name}</h2>
-<div class="sub">{now} · {len([x for x in fav_data if x != 'null'])} book mercato</div>
-<div class="signal">{signal}</div>
-<div class="chart-wrap">
-  <canvas id="chart"></canvas>
-</div>
-<div class="metrics">
-  <div class="card">
-    <div class="label">Pinnacle UND — {und_name}</div>
-    <div class="val">{und_current}</div>
-    <div class="gap {'pos' if gap_und > 0 else 'neg'}">vs avg {avg_und:.3f} · {gap_und:+.3f}</div>
-  </div>
-  <div class="card">
-    <div class="label">Pinnacle FAV — {fav_name}</div>
-    <div class="val">{fav_current}</div>
-    <div class="gap {'pos' if gap_fav > 0 else 'neg'}">vs avg {avg_fav:.3f} · {gap_fav:+.3f}</div>
-  </div>
-</div>
-<script>
-const ctx = document.getElementById('chart').getContext('2d');
-new Chart(ctx, {{
-  type: 'line',
-  data: {{
-    labels: {labels_js},
-    datasets: [
-      {{
-        label: '{fav_name} (Pinnacle)',
-        data: {fav_js},
-        borderColor: '#f1a04e',
-        backgroundColor: 'transparent',
-        borderWidth: 2.5,
-        pointRadius: 5,
-        tension: 0.2,
-        spanGaps: true
-      }},
-      {{
-        label: '{und_name} (Pinnacle)',
-        data: {und_js},
-        borderColor: '#4e9af1',
-        backgroundColor: 'transparent',
-        borderWidth: 2.5,
-        pointRadius: 5,
-        tension: 0.2,
-        spanGaps: true
-      }},
-      {{
-        label: 'avg {fav_name}',
-        data: Array({n}).fill({avg_fav}),
-        borderColor: '#f1a04e',
-        backgroundColor: 'transparent',
-        borderWidth: 1,
-        borderDash: [6, 4],
-        pointRadius: 0
-      }},
-      {{
-        label: 'avg {und_name}',
-        data: Array({n}).fill({avg_und}),
-        borderColor: '#4e9af1',
-        backgroundColor: 'transparent',
-        borderWidth: 1,
-        borderDash: [6, 4],
-        pointRadius: 0
-      }}
-    ]
-  }},
-  options: {{
-    responsive: true,
-    plugins: {{
-      legend: {{ labels: {{ color: '#ccc', font: {{ size: 11 }} }} }},
-      tooltip: {{ mode: 'index', intersect: false }}
-    }},
-    scales: {{
-      x: {{ ticks: {{ color: '#888', font: {{ size: 10 }} }}, grid: {{ color: '#222' }} }},
-      y: {{ ticks: {{ color: '#888', font: {{ size: 10 }} }}, grid: {{ color: '#222' }} }}
-    }}
-  }}
-}});
-</script>
-</body>
-</html>"""
-    return html
 
 def analyze_tennis(user: dict, protocol_text: str) -> tuple:
-    """Analisi tennis completa. Ritorna (testo_analisi, html_grafico_o_None)."""
+    """Analisi tennis v2.1. Ritorna (testo_analisi, html_grafico_o_None, filename_html)."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # OLS
-    ols_info = ""
-    ols_result = None
+    # OLS (opzionale)
+    ols_info = "\nOLS: Non fornito — step opzionale non eseguito."
     if user["ols_dataset"]:
         parsed = parse_ols_dataset(user["ols_dataset"])
         if parsed["rows"] and parsed["und_rank"]:
             ols_result = run_ols(parsed)
             ols_info = f"""
-OLS DATASET:
+OLS DATASET (step opzionale):
 - FAV rank UTR: {parsed['fav_rank']}
 - UND rank UTR: {parsed['und_rank']}
 - Righe storiche: {len(parsed['rows'])}
 - Fair value FAV: {ols_result.get('fair_value_fav')}
 - R²: {ols_result.get('r2')}
 
-REGOLA OLS (MAI SBAGLIARE):
-- fair_value_FAV > quota Pinnacle FAV → modello vede FAV sottovalutato → segnale PRO FAV → L3 ATTIVO
-- fair_value_FAV < quota Pinnacle FAV → modello vede FAV sopravvalutato → segnale PRO UND → L3 ATTIVO solo se converge con L1/L2
-- Se L3 diverge da L1/L2 → L3 NON ATTIVO
+REGOLA OLS DIREZIONE (MAI SBAGLIARE):
+- fair_value_FAV > Pinnacle_FAV → modello vede FAV sottovalutato → segnale PRO FAV
+- fair_value_FAV < Pinnacle_FAV → modello vede FAV sopravvalutato → segnale PRO UND
+- OLS converge con segnale Pinnacle → Punto 5 OLS ATTIVO; diverge → NON ATTIVO
 """
         else:
-            ols_info = "\nOLS: Dataset insufficiente."
-    else:
-        ols_info = "\nOLS: Non fornito → L3 = NON FORNITO"
+            ols_info = "\nOLS: Dataset insufficiente (minimo 3 righe)."
 
-    html_data = ""
+    # HTML grezzo (max 80000 chars) — nessun parsing, direttamente a Claude
+    html_raw = ""
     if user["html_source"]:
-        html_data = f"\n\nDATI MATCH (estratti da HTML TennisExplorer):\n{user['html_source'][:15000]}"
+        html_raw = f"\n\nHTML GREZZO TENNISEXPLORER (max 80000 chars):\n{user['html_source'][:80000]}"
 
-    system_prompt = f"""Sei un analista betting tennis. Applica il Pinnacle Workflow v1.0 in modo preciso.
+    system_prompt = f"""Sei un analista betting tennis. Applica il Protocollo LBA — Pinnacle Workflow v2.1 in modo preciso.
 
-REGOLE CRITICHE — MAI SBAGLIARE:
+=== DEFINIZIONI BASE ===
+- K1 = primo giocatore elencato nella pagina
+- K2 = secondo giocatore elencato
+- FAV = giocatore con quota Pinnacle PIÙ BASSA
+- UND = giocatore con quota Pinnacle PIÙ ALTA
+- Gap = Pinnacle_now − avg_retail_now (su quel segno)
+- avg_retail = media ESCLUDENDO Pinnacle e Betfair
+- Soglia gap: ≥10 tick (0.10) forte · 5-9 tick zona grigia · <5 sub-soglia
 
-1. FAV = giocatore con la QUOTA PINNACLE PIÙ BASSA (non ranking ATP)
-   UND = giocatore con la QUOTA PINNACLE PIÙ ALTA
+=== I 5 PUNTI DI ANALISI ===
 
-2. REGOLA PINNACLE DIREZIONE:
-   - Pinnacle quota MAX su FAV (gap_FAV ≥ +0.08) → sharp money ricevuto su UND → Pinnacle alza FAV per proteggersi → SEGNALE PRO UND
-   - Pinnacle quota MAX su UND (gap_UND ≥ +0.08) → sharp money ricevuto su FAV → Pinnacle alza UND per proteggersi → SEGNALE PRO FAV
-   - Entrambi i gap < 0.05 → NO SIGNAL
+PUNTO 1 — Gap attuale Pinnacle vs retail
+- Pinnacle MAX su X di ≥10 tick → non vuole esposizione su X → segnale PRO Y
+- 5-9 tick → zona grigia, segnale debole
+- <5 tick → sub-soglia
 
-3. CALCOLO GAP:
-   gap_FAV = Pinnacle_FAV - avg_mercato_FAV
-   gap_UND = Pinnacle_UND - avg_mercato_UND
-   avg_mercato = media quote ESCLUDENDO Pinnacle e Betfair
+PUNTO 2 — Comportamento retail (Δ apertura → attuale)
+- Calcola Δ_retail_K1 = avg_now_K1 - avg_open_K1
+- Retail stesso senso sharp → conferma; direzione opposta → più robusto; fermo → molto robusto
 
-4. LAYER STAKE (additivi, max 1.00u):
-   L1 +0.25u: drift grafico Pinnacle sale su un lato (segnale pro opposto) — valuta dal storico
-   L2 +0.25u: gap Pinnacle vs avg ≥ +0.08 (conferma numerica)
-   L3 +0.25u: OLS converge con segnale L1/L2
-   Se nessun layer attivo O segnali divergenti → NO BET (0.00u)
+PUNTO 3 — Leadership apertura (chi muove per primo)
+- lag = Pinnacle_open - avg_retail_ante_Pinnacle
+- lag < -0.05 → GUIDA (gap = segnale sharp puro)
+- -0.05 ≤ lag ≤ +0.10 → RECEPISCE (gap valido)
+- lag > +0.10 → INSEGUE (gap potenzialmente artefatto → leggere Punto 4)
 
-5. OUTPUT OBBLIGATORIO in questo formato esatto:
+PUNTO 4 — Drift e timing Pinnacle
+- Δ_Pinnacle_K1 = Pinnacle_now_K1 - Pinnacle_open_K1
+- X scende nel tempo → PRO X; X sale → PRO Y; flat → neutro
+- Timing: pre-match (ultime 2h) = peso massimo; notte = peso alto; apertura = medio
 
-MATCH: [FAV] vs [UND]
-FAV: [nome] | Pinnacle: [x.xx] | Avg mercato: [x.xx] ([N] book) | Gap: [±x.xx]
-UND: [nome] | Pinnacle: [x.xx] | Avg mercato: [x.xx] ([N] book) | Gap: [±x.xx]
+PUNTO 5 — Direzionalità
+- Unidirezionale → segnale forte; con rimbalzo → indebolito; flat → neutro
+- Rimbalzo pre-match = segnale originale indebolito
 
-SEGNALE PINNACLE: PRO [nome] / NO SIGNAL
-Motivazione: [una riga]
+=== SCORING CONVERGENZA ===
+- 4-5 punti stessa direzione → GIOCA
+- 3 punti + gap ≥10 tick → GIOCA
+- 2-3 punti + gap zona grigia → ATTENZIONE (stake ridotto)
+- 0-1 punti / gap sub-soglia → NO BET
+- Rimbalzo pre-match → NO BET o rivalutare
 
-L1 (drift grafico): [ATTIVO +0.25u — motivazione] / [NON ATTIVO — motivazione]
-L2 (gap ≥0.08): [ATTIVO +0.25u] / [NON ATTIVO]
-L3 (OLS): [ATTIVO +0.25u] / [NON ATTIVO] / [NON FORNITO]
+=== OUTPUT PARTE 1 — ANALISI TESTUALE ===
+Produci questa analisi:
 
-STAKE TOTALE: [x.xx]u
-VERDICT: GIOCA [nome] @ [quota] / NO BET
+MATCH: [K1] vs [K2] · [Torneo] · [Data] · [Superficie]
+FAV: [nome] | Pinnacle now: [x.xx] | Pinnacle open: [x.xx] | avg retail now: [x.xx] ([N] book) | Gap: [±x.xx]
+UND: [nome] | Pinnacle now: [x.xx] | Pinnacle open: [x.xx] | avg retail now: [x.xx] ([N] book) | Gap: [±x.xx]
+
+PUNTO 1 · Gap: [✓/—/✗] [descrizione + tick] → PRO [nome] / zona grigia / sub-soglia
+PUNTO 2 · Retail: [✓/—/✗] [Δ_K1 e Δ_K2] → [segue/diverge/fermo]
+PUNTO 3 · Leadership: [GUIDA/RECEPISCE/INSEGUE] — lag=[x.xx] → [impatto sul gap]
+PUNTO 4 · Drift+timing: [✓/—/✗] Δ_FAV=[x.xx] Δ_UND=[x.xx] · timing=[fase] → PRO [nome] / neutro
+PUNTO 5 · Direzionalità: [UNIDIREZIONALE/RIMBALZO/FLAT] → [forte/indebolito/neutro]
+
+CONVERGENZA: [N]/5 punti PRO [nome] · gap max [x.xx]
+VERDICT: GIOCA [nome] @ [quota] [stake]u / ATTENZIONE [nome] @ [quota] [stake ridotto]u / NO BET
 
 ---
-DATI_GRAFICO_JSON:
-{{
-  "match_name": "[FAV] vs [UND]",
-  "fav_name": "[nome FAV]",
-  "und_name": "[nome UND]",
-  "hist_fav": [{{"time":"HH:MM","quote":x.xx}}, ...],
-  "hist_und": [{{"time":"HH:MM","quote":x.xx}}, ...],
-  "avg_fav": x.xx,
-  "avg_und": x.xx,
-  "gap_fav": x.xx,
-  "gap_und": x.xx
-}}
 
-PROTOCOLLO:
-{protocol_text[:3000]}"""
+=== OUTPUT PARTE 2 — FILE HTML ===
+Dopo l'analisi testuale, produci il blocco delimitato esattamente così:
 
-    instruction = f"""Analizza il match tennis con il Pinnacle Workflow v1.0.
+HTML_OUTPUT_START
+[file HTML completo standalone]
+HTML_OUTPUT_END
+
+Il file HTML deve rispettare queste specifiche obbligatorie:
+
+STRUTTURA (in ordine):
+1. Match header: nome match · torneo · data · ora · superficie
+2. Verdict Box: pallini ✓/—/✗ per i 5 punti + verdetto GIOCA/ATTENZIONE/NO BET + griglia metriche
+3. Grafico Chart.js con 6 dataset:
+   - Curva solida FAV Pinnacle (verde #2E7D32)
+   - Curva solida UND Pinnacle (rosso #C62828)
+   - Tratteggiata [6,4] avg_now FAV (verde, opacity 0.5)
+   - Tratteggiata [6,4] avg_now UND (rosso, opacity 0.5)
+   - Tratteggiata [2,4] avg_open FAV (verde, opacity 0.15)
+   - Tratteggiata [2,4] avg_open UND (rosso, opacity 0.15)
+   I punti del grafico devono essere colorati: verde se quota scende, rosso se sale, grigio per il primo punto
+4. Card metriche (griglia 2 colonne): quota attuale, avg retail, gap (rosso≥10tick, arancio 5-9, grigio<5), Δ Pinnacle, Δ retail
+5. Tabella 5 punti: numero, nome, badge colorato ✓/—/✗
+6. Timeline Pinnacle: riga per rilevazione con pallino fase (mattina=blu, pomeriggio=arancio, sera=rosso, notte=viola), barra proporzionale, delta, evidenzia rimbalzi in #FFF8E1
+
+COLORI VERDETTO: GIOCA → #2E7D32 · ATTENZIONE → #E65100 · NO BET → #999
+TECNICO: Chart.js 4.4.1 da cdnjs · font -apple-system · bg body #f8f8f6 · card bg #fff con box-shadow 0 1px 4px · border-radius 10px · padding body 12px · mobile-first 375px
+
+NOME FILE (includi in un commento HTML <!-- filename: cognome_k1_cognome_k2_pinnacle.html -->)
+
+PROTOCOLLO COMPLETO:
+{protocol_text[:4000]}"""
+
+    instruction = f"""Analizza il match tennis con il Pinnacle Workflow v2.1.
 {ols_info}
-{html_data}"""
+{html_raw}"""
 
     content = []
     for img_bytes in user["images"]:
@@ -485,36 +302,27 @@ PROTOCOLLO:
 
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=3000,
+        max_tokens=8000,
         system=system_prompt,
         messages=[{"role": "user", "content": content}],
     )
-    analysis_text = message.content[0].text
+    full_response = message.content[0].text
 
-    # Estrai JSON grafico
+    # Estrai HTML dal blocco delimitato
     html_chart = None
-    try:
-        json_match = re.search(r'DATI_GRAFICO_JSON:\s*(\{.*?\})\s*$', analysis_text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(1))
-            html_chart = generate_pinnacle_chart_html(
-                match_name=data["match_name"],
-                hist_fav=data["hist_fav"],
-                hist_und=data["hist_und"],
-                avg_fav=float(data["avg_fav"]),
-                avg_und=float(data["avg_und"]),
-                gap_fav=float(data["gap_fav"]),
-                gap_und=float(data["gap_und"]),
-                fav_name=data["fav_name"],
-                und_name=data["und_name"]
-            )
-    except Exception as e:
-        logger.error(f"Errore generazione grafico: {e}")
+    filename_html = "pinnacle_drift.html"
+    html_match = re.search(r'HTML_OUTPUT_START\s*(.*?)\s*HTML_OUTPUT_END', full_response, re.DOTALL)
+    if html_match:
+        html_chart = html_match.group(1).strip()
+        # Estrai filename dal commento HTML se presente
+        fn_match = re.search(r'filename:\s*([\w_-]+\.html)', html_chart)
+        if fn_match:
+            filename_html = fn_match.group(1)
 
-    # Pulisci testo dai dati grafico
-    clean_text = re.sub(r'DATI_GRAFICO_JSON:.*$', '', analysis_text, flags=re.DOTALL).strip()
+    # Testo analisi = tutto prima di HTML_OUTPUT_START
+    clean_text = re.sub(r'\s*HTML_OUTPUT_START.*$', '', full_response, flags=re.DOTALL).strip()
 
-    return clean_text, html_chart
+    return clean_text, html_chart, filename_html
 
 def analyze_soccer(user: dict, protocol_text: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -582,13 +390,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(doc.file_id)
         file_bytes = await file.download_as_bytearray()
         raw = file_bytes.decode("utf-8", errors="ignore")
-        if ext in ("html", "htm"):
-            parsed = parse_tennis_html(raw)
-            user["html_source"] = parsed if len(parsed) > 50 else raw[:20000]
-        else:
-            user["html_source"] = raw[:20000]
+        # HTML grezzo direttamente a Claude — nessun parsing locale
+        user["html_source"] = raw[:80000]
         user["state"] = STATE_WAITING_OLS
-        html_len = len(user["html_source"]) if user["html_source"] else 0
+        html_len = len(user["html_source"])
         logger.info(f"[DOC] user_id={user_id} html_source len={html_len} state={user['state']}")
         await update.message.reply_text(
             f"📄 File *{filename}* caricato ({html_len} chars).\n\n" + OLS_FORMAT_HELP,
@@ -697,10 +502,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             if sport == "tennis":
-                result_text, html_chart = analyze_tennis(user, protocol)
+                result_text, html_chart, filename_html = analyze_tennis(user, protocol)
             else:
                 result_text = analyze_soccer(user, protocol)
                 html_chart = None
+                filename_html = None
 
             user["images"] = []
             user["html_source"] = None
@@ -712,11 +518,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if html_chart:
                 html_bytes = html_chart.encode("utf-8")
                 html_file = io.BytesIO(html_bytes)
-                html_file.name = "pinnacle_drift.html"
+                html_file.name = filename_html
                 await update.message.reply_document(
                     document=html_file,
-                    filename="pinnacle_drift.html",
-                    caption="📊 Grafico Pinnacle Drift — aprilo nel browser"
+                    filename=filename_html,
+                    caption="📊 Pinnacle Workflow v2.1 — aprilo nel browser"
                 )
 
         except Exception as e:
@@ -739,9 +545,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # HTML incollato
+    # HTML incollato direttamente nel chat
     if user["sport"] == "tennis" and len(text) > 100 and "<" in text and ">" in text:
-        user["html_source"] = parse_tennis_html(text)
+        user["html_source"] = text[:80000]
         user["state"] = STATE_WAITING_OLS
         await update.message.reply_text(
             "📄 HTML ricevuto.\n\n" + OLS_FORMAT_HELP, parse_mode="Markdown"

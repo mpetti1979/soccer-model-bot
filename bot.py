@@ -16,6 +16,10 @@ from telegram.ext import (
 )
 import anthropic
 import math
+import json
+from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +28,112 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+SHEET_ID = "1LFWu2qK42cVQDh9-keT23_M0tydr9CERPStKt_8OnFQ"
+SHEET_HEADERS = [
+    "data", "home", "away", "torneo", "verdetto", "n_segnali",
+    "gap_home", "gap_away", "drift_pinn_home", "drift_pinn_away",
+    "outlier_home", "outlier_away", "retail_drift_home", "retail_drift_away",
+    "ols_forecast", "ols_delta_pct", "ols_class",
+    "quota_max_home", "quota_max_away",
+    "lato_giocato", "quota_giocata", "esito", "pl"
+]
+
+def get_sheet():
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if not creds_json:
+        return None
+    try:
+        creds_dict = json.loads(creds_json)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEET_ID)
+        try:
+            ws = sh.worksheet("DB")
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet("DB", rows=1000, cols=len(SHEET_HEADERS))
+            ws.append_row(SHEET_HEADERS)
+        return ws
+    except Exception as e:
+        logger.error(f"Sheets error: {e}")
+        return None
+
+def save_match(state: dict, verdetto: str, n_segnali: int, lato: str, quota: float, esito: str, pl: float):
+    ws = get_sheet()
+    if not ws:
+        return False
+    d = state.get("html_data") or {}
+    p = d.get("pinnacle", {})
+    r = d.get("retail", {})
+    ols = state.get("ols_data") or {}
+    row = [
+        datetime.now().strftime("%d/%m/%Y"),
+        d.get("home_name", ""),
+        d.get("away_name", ""),
+        d.get("match_info", "")[:50],
+        verdetto,
+        n_segnali,
+        d.get("gap_pinn_vs_retail", {}).get("home", ""),
+        d.get("gap_pinn_vs_retail", {}).get("away", ""),
+        p.get("drift_home", ""),
+        p.get("drift_away", ""),
+        str(p.get("outlier_home", "")),
+        str(p.get("outlier_away", "")),
+        r.get("drift_home", ""),
+        r.get("drift_away", ""),
+        ols.get("forecast", ""),
+        ols.get("delta_pct", ""),
+        ols.get("classification", ""),
+        d.get("max_home", {}).get("q", ""),
+        d.get("max_away", {}).get("q", ""),
+        lato,
+        quota,
+        esito,
+        pl,
+    ]
+    try:
+        ws.append_row(row)
+        return True
+    except Exception as e:
+        logger.error(f"Save error: {e}")
+        return False
+
+def get_pattern_context(gap_home: float, gap_away: float, outlier_home: bool, outlier_away: bool) -> str:
+    """Legge lo storico e trova pattern simili."""
+    ws = get_sheet()
+    if not ws:
+        return ""
+    try:
+        rows = ws.get_all_records()
+        if len(rows) < 5:
+            return ""
+        # Pattern simile: stesso outlier e gap nella stessa fascia
+        similar = []
+        for row in rows:
+            if not row.get("esito"):
+                continue
+            try:
+                roh = str(row.get("outlier_home", "")).lower() == str(outlier_home).lower()
+                roa = str(row.get("outlier_away", "")).lower() == str(outlier_away).lower()
+                if roh and roa:
+                    similar.append(row)
+            except:
+                continue
+        if len(similar) < 3:
+            return ""
+        wins = sum(1 for r in similar if str(r.get("esito", "")).upper() == "W")
+        pct = round(wins / len(similar) * 100)
+        avg_pl = round(sum(float(r.get("pl", 0) or 0) for r in similar) / len(similar), 2)
+        return (
+            f"\n\n=== PATTERN STORICO ({len(similar)} casi simili) ===\n"
+            f"Outlier home={outlier_home} away={outlier_away}\n"
+            f"Win rate: {pct}% ({wins}/{len(similar)}) | P&L medio: {avg_pl:+.2f}u"
+        )
+    except Exception as e:
+        logger.error(f"Pattern error: {e}")
+        return ""
+
 
 # ─────────────────────────────────────────────
 # PARSER TENNISEXPLORER HTML
@@ -613,6 +723,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         result = await analyze(data_summary + ols_summary)
+        # Salva verdetto in stato per /risultato
+        if "GIOCA" in result.upper():
+            state["last_verdetto"] = "GIOCA"
+        elif "ATTENZIONE" in result.upper():
+            state["last_verdetto"] = "ATTENZIONE"
+        else:
+            state["last_verdetto"] = "NO BET"
+        state["last_segnali"] = result.count("✓")
+        # Salva quota favorito per /risultato
+        if state["html_data"]:
+            p = state["html_data"].get("pinnacle", {})
+            hq = p.get("home_curr")
+            aq = p.get("away_curr")
+            if hq and aq:
+                if hq <= aq:
+                    state["last_fav"] = "home"
+                    state["last_quota_fav"] = hq
+                else:
+                    state["last_fav"] = "away"
+                    state["last_quota_fav"] = aq
         state["html_data"] = None
         state["ols_data"] = None
         await update.message.reply_text(result, parse_mode="Markdown")
@@ -648,6 +778,104 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
+# RISULTATO HANDLER
+# ─────────────────────────────────────────────
+
+async def risultato(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Uso: /risultato W  oppure  /risultato L
+    W = ha vinto il favorito, L = ha vinto l'underdog
+    Quota presa da Pinnacle in memoria, stake fisso 1u
+    """
+    uid = update.effective_user.id
+    state = get_state(uid)
+    args = context.args
+
+    if not args:
+        await update.message.reply_text("Uso: `/risultato W` oppure `/risultato L`", parse_mode="Markdown")
+        return
+
+    esito = args[0].upper()
+    if esito not in ("W", "L"):
+        await update.message.reply_text("❌ Esito deve essere W o L")
+        return
+
+    # Quota Pinnacle del favorito (quota più bassa = favorito)
+    d = state.get("html_data") or {}
+    p = d.get("pinnacle", {})
+    home_q = p.get("home_curr")
+    away_q = p.get("away_curr")
+
+    if home_q and away_q:
+        if home_q <= away_q:
+            fav = "home"
+            quota_fav = home_q
+        else:
+            fav = "away"
+            quota_fav = away_q
+    elif state.get("last_quota_fav"):
+        fav = state.get("last_fav", "N/A")
+        quota_fav = state["last_quota_fav"]
+    else:
+        await update.message.reply_text("❌ Nessuna quota Pinnacle in memoria. Analizza prima il match.")
+        return
+
+    pl = round((quota_fav - 1) if esito == "W" else -1, 3)
+    verdetto = state.get("last_verdetto", "N/A")
+    n_segnali = state.get("last_segnali", 0)
+
+    ok = save_match(state, verdetto, n_segnali, fav, quota_fav, esito, pl)
+
+    if ok:
+        emoji = "✅" if esito == "W" else "❌"
+        await update.message.reply_text(
+            f"{emoji} Salvato\n"
+            f"Favorito: {fav} | Quota Pinnacle: {quota_fav} | Esito: {esito} | P&L: {pl:+.2f}u",
+            parse_mode="Markdown"
+        )
+        state["html_data"] = None
+        state["ols_data"] = None
+        state["last_verdetto"] = None
+        state["last_segnali"] = 0
+        state["last_quota_fav"] = None
+        state["last_fav"] = None
+    else:
+        await update.message.reply_text("❌ Errore salvataggio su Google Sheets")
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra statistiche generali dal DB."""
+    ws = get_sheet()
+    if not ws:
+        await update.message.reply_text("❌ Connessione Sheets non disponibile")
+        return
+    try:
+        rows = [r for r in ws.get_all_records() if r.get("esito")]
+        if not rows:
+            await update.message.reply_text("Nessun risultato nel DB ancora.")
+            return
+        total = len(rows)
+        wins = sum(1 for r in rows if str(r.get("esito", "")).upper() == "W")
+        total_pl = round(sum(float(r.get("pl", 0) or 0) for r in rows), 3)
+        roi = round(total_pl / total * 100, 1) if total else 0
+        # Breakdown per outlier
+        oul_rows = [r for r in rows if str(r.get("outlier_home")) == "True" or str(r.get("outlier_away")) == "True"]
+        oul_wins = sum(1 for r in oul_rows if str(r.get("esito", "")).upper() == "W")
+        msg = (
+            f"📊 *Statistiche LBA DB*\n\n"
+            f"Totale bet: {total}\n"
+            f"Win rate: {round(wins/total*100)}% ({wins}/{total})\n"
+            f"P&L totale: {total_pl:+.3f}u\n"
+            f"ROI: {roi:+.1f}%\n\n"
+            f"🔍 *Con outlier Pinnacle* ({len(oul_rows)} bet):\n"
+            f"Win rate: {round(oul_wins/len(oul_rows)*100) if oul_rows else 0}% ({oul_wins}/{len(oul_rows)})"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+
+# ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 
@@ -655,6 +883,8 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("risultato", risultato))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

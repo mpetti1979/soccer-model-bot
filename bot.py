@@ -272,11 +272,13 @@ def parse_tennisexplorer(html: str) -> dict:
     gap_home = round(pinn_home_curr - retail_home_curr, 3) if pinn_home_curr and retail_home_curr else None
     gap_away = round(pinn_away_curr - retail_away_curr, 3) if pinn_away_curr and retail_away_curr else None
 
-    # Pinnacle outlier: Pinnacle >= max retail sul quel lato
-    retail_home_max = max([v["home_current"] for v in retail.values() if v["home_current"]], default=None)
-    retail_away_max = max([v["away_current"] for v in retail.values() if v["away_current"]], default=None)
-    outlier_home = pinn_home_curr and retail_home_max and (pinn_home_curr >= retail_home_max - 0.01)
-    outlier_away = pinn_away_curr and retail_away_max and (pinn_away_curr >= retail_away_max - 0.01)
+    # Pinnacle outlier: Pinnacle è MAX su quel lato tra TUTTI i book
+    all_home_except_pinn = [v["home_current"] for k, v in books.items() if k != "Pinnacle" and v["home_current"]]
+    all_away_except_pinn = [v["away_current"] for k, v in books.items() if k != "Pinnacle" and v["away_current"]]
+    retail_home_max = max(all_home_except_pinn, default=None)
+    retail_away_max = max(all_away_except_pinn, default=None)
+    outlier_home = bool(pinn_home_curr and retail_home_max and pinn_home_curr >= retail_home_max)
+    outlier_away = bool(pinn_away_curr and retail_away_max and pinn_away_curr >= retail_away_max)
 
     # Drift Pinnacle
     pinn_drift_home = round(pinn_home_curr - pinn_home_open, 3) if pinn_home_curr and pinn_home_open else None
@@ -285,6 +287,67 @@ def parse_tennisexplorer(html: str) -> dict:
     # Retail drift
     retail_drift_home = round(retail_home_curr - retail_home_open, 3) if retail_home_curr and retail_home_open else None
     retail_drift_away = round(retail_away_curr - retail_away_open, 3) if retail_away_curr and retail_away_open else None
+
+    # ── Combo Pinnacle vs retail (apertura e attuale) ──
+    def pinn_combo(pinn_open, retail_open, pinn_curr, retail_curr):
+        if not all([pinn_open, retail_open, pinn_curr, retail_curr]):
+            return "N/A"
+        open_above = pinn_open >= retail_open
+        curr_above = pinn_curr >= retail_curr
+        if open_above and curr_above:
+            return "GUIDA"        # Pinna sopra retail sia in apertura che ora
+        elif open_above and not curr_above:
+            return "ANTICIPA"     # Pinna era sopra, retail ha recuperato/superato
+        elif not open_above and curr_above:
+            return "ENTRA_TARDI"  # Pinna era sotto, ora è sopra
+        else:
+            return "INSEGUE"      # Pinna sotto retail in entrambi i momenti
+
+    combo_home = pinn_combo(pinn_home_open, retail_home_open, pinn_home_curr, retail_home_curr)
+    combo_away = pinn_combo(pinn_away_open, retail_away_open, pinn_away_curr, retail_away_curr)
+
+    # ── Pattern movimento Pinnacle ──
+    def detect_pattern(history):
+        """Rileva pattern da lista di snapshot Pinnacle [{time, q}]"""
+        quotes = [h["q"] for h in history if h["time"] != "open"]
+        if not quotes or len(quotes) < 2:
+            return "FLAT"
+        total_move = quotes[-1] - quotes[0]
+        if abs(total_move) < 0.03:
+            return "FLAT"
+        # Verifica unidirezionalità
+        diffs = [quotes[i+1] - quotes[i] for i in range(len(quotes)-1)]
+        signs = [1 if d > 0.005 else -1 if d < -0.005 else 0 for d in diffs]
+        signs = [s for s in signs if s != 0]
+        if not signs:
+            return "FLAT"
+        # Inversione tardiva: ultimi 2 movimenti invertono il trend precedente
+        if len(signs) >= 3:
+            early = signs[:-2]
+            late = signs[-2:]
+            early_dir = sum(early)
+            late_dir = sum(late)
+            if early_dir > 0 and late_dir < 0:
+                return "INV"
+            if early_dir < 0 and late_dir > 0:
+                return "INV"
+        # Rimbalzo: cambio di segno nel mezzo
+        if len(set(signs)) > 1:
+            # SPIKE: movimento brusco in ultimo tick
+            if len(diffs) >= 2 and abs(diffs[-1]) >= 0.05:
+                return "SPIKE"
+            return "RIM"
+        # Unidirezionale
+        if all(s > 0 for s in signs):
+            return "UNI+"
+        if all(s < 0 for s in signs):
+            return "UNI-"
+        return "FLAT"
+
+    pinn_home_hist = books.get("Pinnacle", {}).get("home_history", [])
+    pinn_away_hist = books.get("Pinnacle", {}).get("away_history", [])
+    pattern_home = detect_pattern(pinn_home_hist)
+    pattern_away = detect_pattern(pinn_away_hist)
 
     return {
         "home_name": home_name,
@@ -312,6 +375,8 @@ def parse_tennisexplorer(html: str) -> dict:
         "max_home": {"q": max_home, "book": max_home_book},
         "max_away": {"q": max_away, "book": max_away_book},
         "gap_pinn_vs_retail": {"home": gap_home, "away": gap_away},
+        "combo": {"home": combo_home, "away": combo_away},
+        "pattern": {"home": pattern_home, "away": pattern_away},
     }
 
 
@@ -319,64 +384,69 @@ def parse_tennisexplorer(html: str) -> dict:
 # SYSTEM PROMPT ANALISI
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Sei un analista di scommesse tennis specializzato nel flusso sharp money Pinnacle.
+SYSTEM_PROMPT = """Sei un analista di scommesse tennis. Ricevi dati numerici già calcolati. Applica le regole sotto usando SOLO i numeri forniti. NON inventare nulla.
 
-Ricevi dati strutturati da TennisExplorer (e opzionalmente OCR da screenshot AsianOdds) e produci un'analisi completa.
+## SEGNALE 1 — OUTLIER PINNACLE
+- Pinnacle=MAX su Home → sharp su Away → PRO Away
+- Pinnacle=MAX su Away → sharp su Home → PRO Home
+- Pinnacle=MAX su entrambi → neutro
+- Pinnacle non MAX → no segnale
 
-## SEGNALI DA VALUTARE (max 3 segnali meccanici + OLS opzionale)
+## SEGNALE 2 — COMBO (posizione Pinnacle vs retail in apertura e ora)
+Leggi "Combo Home" e "Combo Away":
+- GUIDA: Pinna sopra retail sia in apertura che ora → sharp persistente → segnale forte nel senso del drift
+- ENTRA_TARDI: Pinna sotto in apertura, sopra ora → sharp entrato in corsa → segnale recente forte
+- ANTICIPA: Pinna sopra in apertura, sotto ora → retail ha raggiunto/superato Pinna → segnale si esaurisce
+- INSEGUE: Pinna sotto retail in apertura E ora → retail guida, no sharp Pinnacle → segnale debole
 
-### Segnale 1 — FLUSSO PINNACLE (obbligatorio)
-- Pinnacle drift home: se scende → soldi su Home → segnale PRO Away
-- Pinnacle drift away: se scende → soldi su Away → segnale PRO Home
-- Regola: quota che SCENDE su Pinnacle = soldi che entrano su quel lato = segnale sull'ALTRO lato
-- Forza: |drift| > 0.10 = forte, 0.05-0.10 = medio, < 0.05 = debole
+## SEGNALE 3 — PATTERN MOVIMENTO PINNACLE
+Leggi "Pattern Pinnacle Home" e "Pattern Pinnacle Away":
+- UNI-: quota scende costante → soldi entrano → PRO quel lato, segnale forte
+- UNI+: quota sale costante → soldi escono → PRO avversario, segnale forte
+- SPIKE: movimento brusco ultimo tick → info fresca, peso massimo
+- INV: inversione tardiva → segnale originale si inverte, cautela massima
+- RIM: rimbalzo → mercato conteso, segnale indebolito
+- FLAT: nessun movimento → neutro
 
-### Segnale 2 — OUTLIER PINNACLE (obbligatorio)
-- Se Pinnacle è il book con quota MAX su un lato = non ha paura dell'esposizione su quel lato = soldi sharp sull'altro
-- Es: Pinnacle MAX su Away → sharp money su Home → segnale PRO Home
-- Verifica con gap Pinnacle vs media retail
+## SEGNALE 4 — DRIFT PINNACLE
+- drift negativo su X → soldi entrati su X → PRO X
+- drift positivo su X → soldi usciti da X → PRO avversario
+- Forza: |drift| >= 0.10 forte · 0.05-0.09 medio · < 0.05 trascurabile
 
-### Segnale 3 — DRIFT RETAIL (obbligatorio)
-- Media retail apertura vs attuale: in quale direzione si è mosso il mercato?
-- Convergenza o divergenza col drift Pinnacle?
-- Se retail e Pinnacle driftano nella stessa direzione = segnale più forte
+## SEGNALE 5 — OLS (solo se presente)
+- forecast < mercato Pinnacle → PRO avversario del soggetto
+- forecast > mercato Pinnacle → PRO soggetto
 
-### Segnale 4 — OLS (opzionale, solo se dati storici forniti)
-- Confronto forecast OLS vs Pinnacle attuale sul soggetto
-- forecast < mercato → mercato quota soggetto più alto del modello → non ha paura di ricevere gioco sul soggetto → sharp sull'avversario → SEGNALE PRO avversario
-- forecast > mercato → mercato quota soggetto più basso del modello → non ha paura di ricevere gioco sull'avversario → sharp sul soggetto → SEGNALE PRO soggetto
-- Aggiungi come 4° segnale con R² e Δ%
+## GRIGLIA DECISIONALE
+- 3+ segnali convergenti, gap >= 0.10 → GIOCA
+- 3 segnali, gap 0.05-0.09 → ATTENZIONE
+- 2 segnali o meno → NO BET
+- Segnali contrastanti → NO BET
 
-## OUTPUT FORMAT (Telegram markdown)
+## OUTPUT (esattamente questo formato)
 
-```
-🎾 [TORNEO] — [ROUND] | [SUPERFICIE]
-📅 [DATA] | [ORA]
-🇮🇹 [HOME] vs [AWAY] 🏳️
+🎾 [torneo se disponibile] | [superficie se disponibile]
+📅 [data se disponibile]
+🏠 [Home] vs [Away]
 
-[Testo narrativo 2-3 righe: descrivi il flusso in modo chiaro. Inizia sempre dal dato più forte. Mai gergo tecnico grezzo — racconta cosa sta succedendo.]
+[2-3 righe. Cita valori esatti: combo, pattern, drift, gap.]
 
-⭐ Flusso Pinnacle: ★★★☆☆
-⭐ Outlier: ★★★★☆
-⭐ Drift retail: ★★★☆☆
-⭐ OLS: N/A (o ★★★★★ se disponibile)
+⭐ Outlier: ★☆☆☆☆
+⭐ Combo/posizione: ★★★☆☆
+⭐ Pattern: ★★★★☆
+⭐ Drift: ★★★☆☆
+⭐ OLS: N/A
 
-🎯 [GIOCATORE SEGNALATO] | Quota ~[QUOTA MAX]
-📦 Stake: [0.5% standard | 0.8% forte | 1.0% molto forte]
+🎯 [giocatore] | Quota MAX: [dal campo max_home o max_away]
+✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET — [N] segnali convergenti
 
-✅ BET / ❌ NO BET — [N]/[TOT] segnali convergenti
-```
+## STELLE
+★★★★★ molto forte (gap/drift >= 0.10, UNI, GUIDA, ENTRA_TARDI, outlier netto)
+★★★☆☆ medio (gap 0.05-0.09, RIM, ANTICIPA)
+★★☆☆☆ debole
+★☆☆☆☆ neutro/assente
 
-## REGOLE STAKE
-- 1/3 segnali convergenti → NO BET
-- 2/3 segnali convergenti → 0.5% bankroll
-- 3/3 segnali convergenti → 0.8%
-- 3/3 + OLS convergente → 1.0%
-
-## REGOLA QUOTA MAX
-Usa sempre la quota MAX attuale sul lato segnalato (dal campo max_home o max_away nei dati).
-
-Rispondi SOLO con il messaggio formattato. Zero spiegazioni aggiuntive."""
+Rispondi SOLO con il messaggio. Niente altro."""
 
 
 # ─────────────────────────────────────────────
@@ -400,8 +470,12 @@ def build_data_summary(data: dict) -> str:
         "=== PINNACLE ===",
         f"Home: apertura={p['home_open']} → attuale={p['home_curr']} | drift={p['drift_home']}",
         f"Away: apertura={p['away_open']} → attuale={p['away_curr']} | drift={p['drift_away']}",
-        f"Outlier Home (Pinnacle=MAX): {p['outlier_home']}",
-        f"Outlier Away (Pinnacle=MAX): {p['outlier_away']}",
+        f"Outlier Home (Pinnacle=MAX su tutti i book): {p['outlier_home']}",
+        f"Outlier Away (Pinnacle=MAX su tutti i book): {p['outlier_away']}",
+        f"Pattern Pinnacle Home: {data.get('pattern', {}).get('home', 'N/A')}",
+        f"Pattern Pinnacle Away: {data.get('pattern', {}).get('away', 'N/A')}",
+        f"Combo Home (Pinna vs retail): {data.get('combo', {}).get('home', 'N/A')} | apertura: Pinna={p['home_open']} vs retail={data['retail']['home_open']}",
+        f"Combo Away (Pinna vs retail): {data.get('combo', {}).get('away', 'N/A')} | apertura: Pinna={p['away_open']} vs retail={data['retail']['away_open']}",
         "",
         "=== RETAIL MEDIA ===",
         f"Home: apertura={r['home_open']} → attuale={r['home_curr']} | drift={r['drift_home']}",

@@ -177,7 +177,7 @@ def parse_tennisexplorer(html: str) -> dict:
             continue
 
         book_name = cells[0].get_text(strip=True)
-        if not book_name or len(cells) < 16:
+        if not book_name or len(cells) < 3:
             continue
 
         def get_current(cell):
@@ -208,9 +208,6 @@ def parse_tennisexplorer(html: str) -> dict:
             return history
 
         home_current = get_current(cells[1])
-        # Home history starts at cell 2
-        home_history = get_history_flat(2)
-        home_open = next((h["q"] for h in home_history if h["time"] == "open"), None)
 
         # Find away block (next cell with odds-in div after home block)
         away_current = None
@@ -224,10 +221,14 @@ def parse_tennisexplorer(html: str) -> dict:
                     away_cell_idx = ci + 1  # history starts after this cell
                     break
 
+        # Home history: starts at cell 2, but only up to away block
+        home_history = get_history_flat(2)
+        home_open = next((h["q"] for h in home_history if h["time"] == "open"), None)
+
         away_history = get_history_flat(away_cell_idx) if away_cell_idx else []
         away_open = next((h["q"] for h in away_history if h["time"] == "open"), None)
 
-        if home_current is None:
+        if home_current is None or away_current is None:
             continue
 
         books[book_name] = {
@@ -384,69 +385,50 @@ def parse_tennisexplorer(html: str) -> dict:
 # SYSTEM PROMPT ANALISI
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Sei un analista di scommesse tennis. Ricevi dati numerici già calcolati. Applica le regole sotto usando SOLO i numeri forniti. NON inventare nulla.
+SYSTEM_PROMPT = """Compila questo template con i dati ricevuti. Non aggiungere nulla che non sia nei dati. Non usare metafore o narrativa.
 
-## SEGNALE 1 — OUTLIER PINNACLE
-- Pinnacle=MAX su Home → sharp su Away → PRO Away
-- Pinnacle=MAX su Away → sharp su Home → PRO Home
-- Pinnacle=MAX su entrambi → neutro
-- Pinnacle non MAX → no segnale
+STEP 1 — Leggi questi campi esatti dai dati:
+- Outlier Home / Outlier Away (True/False)
+- Combo Home / Combo Away (GUIDA/ENTRA_TARDI/ANTICIPA/INSEGUE)
+- Pattern Pinnacle Home / Pattern Pinnacle Away (UNI+/UNI-/RIM/SPIKE/INV/FLAT)
+- drift Pinnacle Home / drift Pinnacle Away (numero)
+- gap Home / gap Away (numero)
+- OLS forecast e delta% (se presenti)
 
-## SEGNALE 2 — COMBO (posizione Pinnacle vs retail in apertura e ora)
-Leggi "Combo Home" e "Combo Away":
-- GUIDA: Pinna sopra retail sia in apertura che ora → sharp persistente → segnale forte nel senso del drift
-- ENTRA_TARDI: Pinna sotto in apertura, sopra ora → sharp entrato in corsa → segnale recente forte
-- ANTICIPA: Pinna sopra in apertura, sotto ora → retail ha raggiunto/superato Pinna → segnale si esaurisce
-- INSEGUE: Pinna sotto retail in apertura E ora → retail guida, no sharp Pinnacle → segnale debole
+STEP 2 — Assegna segnale per ogni voce:
+Outlier: True su X solo → PRO avversario · True entrambi o False → NEUTRO
+Combo: GUIDA/ENTRA_TARDI → attivo · ANTICIPA/INSEGUE → debole
+Pattern: UNI- su X → PRO X · UNI+ su X → PRO avversario · SPIKE → peso doppio · INV → invalida drift · RIM/FLAT → neutro
+Drift: negativo su X → PRO X · positivo su X → PRO avversario · ignora se <0.05
+OLS: forecast > Pinnacle → PRO soggetto · forecast < Pinnacle → PRO avversario
 
-## SEGNALE 3 — PATTERN MOVIMENTO PINNACLE
-Leggi "Pattern Pinnacle Home" e "Pattern Pinnacle Away":
-- UNI-: quota scende costante → soldi entrano → PRO quel lato, segnale forte
-- UNI+: quota sale costante → soldi escono → PRO avversario, segnale forte
-- SPIKE: movimento brusco ultimo tick → info fresca, peso massimo
-- INV: inversione tardiva → segnale originale si inverte, cautela massima
-- RIM: rimbalzo → mercato conteso, segnale indebolito
-- FLAT: nessun movimento → neutro
+STEP 3 — Conta convergenza verso stesso giocatore → GIOCA/ATTENZIONE/NO BET
 
-## SEGNALE 4 — DRIFT PINNACLE
-- drift negativo su X → soldi entrati su X → PRO X
-- drift positivo su X → soldi usciti da X → PRO avversario
-- Forza: |drift| >= 0.10 forte · 0.05-0.09 medio · < 0.05 trascurabile
+STEP 4 — Compila questo template ESATTO (sostituisci solo le parti in []):
 
-## SEGNALE 5 — OLS (solo se presente)
-- forecast < mercato Pinnacle → PRO avversario del soggetto
-- forecast > mercato Pinnacle → PRO soggetto
-
-## GRIGLIA DECISIONALE
-- 3+ segnali convergenti, gap >= 0.10 → GIOCA
-- 3 segnali, gap 0.05-0.09 → ATTENZIONE
-- 2 segnali o meno → NO BET
-- Segnali contrastanti → NO BET
-
-## OUTPUT (esattamente questo formato)
-
-🎾 [torneo se disponibile] | [superficie se disponibile]
-📅 [data se disponibile]
+🎾 [torneo o N/D] | [superficie o N/D]
+📅 [data o N/D]
 🏠 [Home] vs [Away]
 
-[2-3 righe. Cita valori esatti: combo, pattern, drift, gap.]
+Outlier: Home=[True/False] Away=[True/False] → [PRO X o NEUTRO]
+Combo: Home=[valore] Away=[valore] → [attivo/debole su X]
+Pattern: Home=[valore] Away=[valore] → [PRO X o neutro]
+Drift Pinna: Home=[numero] Away=[numero] → [PRO X]
+Gap Pinna/retail: Home=[numero] Away=[numero]
+[Se OLS presente: OLS: forecast=[numero] vs Pinna=[numero] → PRO [X]]
 
-⭐ Outlier: ★☆☆☆☆
-⭐ Combo/posizione: ★★★☆☆
-⭐ Pattern: ★★★★☆
-⭐ Drift: ★★★☆☆
-⭐ OLS: N/A
+⭐ Outlier: [stelle]
+⭐ Combo: [stelle]
+⭐ Pattern: [stelle]
+⭐ Drift: [stelle]
+⭐ OLS: [stelle o N/A]
 
-🎯 [giocatore] | Quota MAX: [dal campo max_home o max_away]
-✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET — [N] segnali convergenti
+🎯 [giocatore] | Quota MAX: [numero da max_home o max_away]
+[✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET] — [N] segnali convergenti
 
-## STELLE
-★★★★★ molto forte (gap/drift >= 0.10, UNI, GUIDA, ENTRA_TARDI, outlier netto)
-★★★☆☆ medio (gap 0.05-0.09, RIM, ANTICIPA)
-★★☆☆☆ debole
-★☆☆☆☆ neutro/assente
+STELLE: ★★★★★=forte convergente · ★★★☆☆=medio · ★★☆☆☆=debole · ★☆☆☆☆=neutro/assente
 
-Rispondi SOLO con il messaggio. Niente altro."""
+Scrivi SOLO il template compilato. Niente altro."""
 
 
 # ─────────────────────────────────────────────

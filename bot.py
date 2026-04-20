@@ -16,6 +16,7 @@ from telegram.ext import (
 )
 import anthropic
 import math
+import asyncio
 import json
 from datetime import datetime
 import gspread
@@ -482,22 +483,26 @@ async def analyze(data_summary: str, extra_context: str = "") -> str:
     if extra_context:
         user_msg += f"\n\n=== DATI AGGIUNTIVI (screenshot/OCR) ===\n{extra_context}"
 
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}]
-    )
+    def _call():
+        return client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}]
+        )
+
+    response = await asyncio.to_thread(_call)
     return response.content[0].text
 
 
 async def analyze_screenshot(image_b64: str, mime: str) -> str:
     """OCR + analisi da screenshot AsianOdds (senza HTML)."""
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        messages=[{
+    def _call():
+        return client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            messages=[{
             "role": "user",
             "content": [
                 {
@@ -520,7 +525,8 @@ async def analyze_screenshot(image_b64: str, mime: str) -> str:
                 }
             ]
         }]
-    )
+        )
+    response = await asyncio.to_thread(_call)
     return response.content[0].text
 
 
@@ -606,17 +612,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state["html_data"]:
         # Abbiamo già l'HTML — usiamo OCR solo come contesto aggiuntivo
-        ocr_response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
-                    {"type": "text", "text": "Estrai dal grafico Pinnacle (timeline): snapshot con orario e quota per Home e Away. Formato: HH:MM Home=X.XX Away=X.XX per ogni riga visibile. Solo i dati, niente altro."}
-                ]
-            }]
-        )
+        def _ocr():
+            return client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=500,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                        {"type": "text", "text": "Estrai dal grafico Pinnacle (timeline): snapshot con orario e quota per Home e Away. Formato: HH:MM Home=X.XX Away=X.XX per ogni riga visibile. Solo i dati, niente altro."}
+                    ]
+                }]
+            )
+        ocr_response = await asyncio.to_thread(_ocr)
         extra = ocr_response.content[0].text
         data_summary = build_data_summary(state["html_data"])
         result = await analyze(data_summary, extra_context=extra)

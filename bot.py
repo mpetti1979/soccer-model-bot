@@ -483,13 +483,25 @@ async def analyze(data_summary: str, extra_context: str = "") -> str:
     if extra_context:
         user_msg += f"\n\n=== DATI AGGIUNTIVI (screenshot/OCR) ===\n{extra_context}"
 
-    response = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}]
-    )
-    return response.content[0].text
+    try:
+        logger.info("Chiamata API Anthropic in corso...")
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}]
+            ),
+            timeout=30.0
+        )
+        logger.info("Risposta API ricevuta")
+        return response.content[0].text
+    except asyncio.TimeoutError:
+        logger.error("Timeout API Anthropic dopo 30s")
+        return "❌ Timeout analisi (30s). Riprova."
+    except Exception as e:
+        logger.error(f"Errore API Anthropic: {type(e).__name__}: {e}")
+        return f"❌ Errore API: {type(e).__name__}: {str(e)[:200]}"
 
 
 async def analyze_screenshot(image_b64: str, mime: str) -> str:

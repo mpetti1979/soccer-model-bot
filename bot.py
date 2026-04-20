@@ -1,568 +1,666 @@
+"""
+Tennis Betting Analysis Bot — v3.0
+Input: HTML TennisExplorer + Screenshot AsianOdds
+Output: Verdetto immediato + analisi formattata Telegram
+"""
+
 import os
-import logging
-import requests
-import anthropic
-import base64
 import re
-import math
-import json
-import io
+import base64
+import logging
+from bs4 import BeautifulSoup
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters
+)
+import anthropic
+import math
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
-PROTOCOLS = {
-    "soccer": "https://raw.githubusercontent.com/mpetti1979/soccer-protocols/refs/heads/main/soccer_model_protocol.html",
-    "tennis": "https://raw.githubusercontent.com/mpetti1979/soccer-protocols/refs/heads/main/tennis_lba_protocol.html",
-}
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-STATE_IDLE = "idle"
-STATE_SPORT_SELECTED = "sport_selected"
-STATE_WAITING_OLS = "waiting_ols"
-STATE_READY = "ready"
+# ─────────────────────────────────────────────
+# PARSER TENNISEXPLORER HTML
+# ─────────────────────────────────────────────
 
-USER_SESSIONS = {}
+RETAIL_EXCLUDE = {"Pinnacle", "Betfair", "SBOBET", "Matchbook"}
 
-def get_user(user_id):
-    if user_id not in USER_SESSIONS:
-        USER_SESSIONS[user_id] = {
-            "sport": None,
-            "images": [],
-            "html_source": None,
-            "ols_dataset": None,
-            "state": STATE_IDLE,
-        }
-    return USER_SESSIONS[user_id]
+def parse_tennisexplorer(html: str) -> dict:
+    """Estrae tutte le quote da TennisExplorer HTML."""
+    soup = BeautifulSoup(html, "html.parser")
 
-def reset_user(user_id):
-    USER_SESSIONS[user_id] = {
-        "sport": None,
-        "images": [],
-        "html_source": None,
-        "ols_dataset": None,
-        "state": STATE_IDLE,
-    }
+    # Nome giocatori
+    h1 = soup.find("h1", class_="bg")
+    players = h1.get_text(strip=True).split(" - ") if h1 else ["Home", "Away"]
+    home_name = players[0].strip() if len(players) > 0 else "Home"
+    away_name = players[1].strip() if len(players) > 1 else "Away"
 
-def load_protocol(sport: str) -> str:
-    url = PROTOCOLS.get(sport)
-    if not url:
-        return None
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        return r.text
-    except Exception as e:
-        logger.error(f"Error loading protocol {sport}: {e}")
-        return None
+    # Torneo / data
+    match_info = ""
+    detail_div = soup.find("div", class_="box boxBasic")
+    if detail_div:
+        match_info = detail_div.get_text(separator=" ", strip=True)[:200]
 
-def detect_media_type(image_bytes: bytes) -> str:
-    if image_bytes[:3] == b'\xff\xd8\xff':
-        return "image/jpeg"
-    elif image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
-        return "image/png"
-    return "image/jpeg"
+    odds_div = soup.find("div", id="oddsMenu-1-data")
+    if not odds_div:
+        return {"error": "Sezione odds non trovata nell'HTML"}
 
-def split_message(text: str, max_length: int = 4000) -> list:
-    if len(text) <= max_length:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= max_length:
-            chunks.append(text)
-            break
-        split_at = text.rfind('\n', 0, max_length)
-        if split_at == -1:
-            split_at = max_length
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip('\n')
-    return chunks
+    table = odds_div.find("table")
+    if not table:
+        return {"error": "Tabella odds non trovata"}
 
+    books = {}
 
-def is_ols_format(text: str) -> bool:
-    text_lower = text.lower()
-    return "fav:" in text_lower and "und:" in text_lower
-
-def parse_ols_dataset(text: str) -> dict:
-    result = {"fav_rank": None, "und_rank": None, "rows": []}
-    lines = text.strip().split('\n')
-    in_rows = False
-    for line in lines:
-        line = line.strip()
-        if not line:
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if not cells:
             continue
-        ll = line.lower()
-        if ll.startswith("fav:"):
-            try:
-                result["fav_rank"] = int(ll.replace("fav:", "").strip())
-            except:
-                pass
-        elif ll.startswith("und:"):
-            try:
-                result["und_rank"] = int(ll.replace("und:", "").strip())
-            except:
-                pass
-        elif "avversari" in ll:
-            in_rows = True
-        elif in_rows:
-            parts = line.split()
-            if len(parts) == 3:
-                try:
-                    result["rows"].append({
-                        "q_fav": int(parts[0]) / 100,
-                        "q_avv": int(parts[1]) / 100,
-                        "rank_avv": int(parts[2])
-                    })
-                except:
-                    pass
-    return result
 
-def run_ols(parsed_ols: dict) -> dict:
-    rows = parsed_ols["rows"]
-    und_rank = parsed_ols["und_rank"]
-    if len(rows) < 3:
-        return {"error": "Minimo 3 righe storiche richieste"}
+        first_classes = " ".join(cells[0].get("class", []))
+        if "first" not in first_classes or "tl" not in first_classes:
+            continue
 
-    xs, ys = [], []
-    for row in rows:
-        total = (1 / row["q_fav"]) + (1 / row["q_avv"])
-        p_fav = (1 / row["q_fav"]) / total
-        xs.append(math.log(row["rank_avv"]))
-        ys.append(math.log(p_fav))
+        book_name = cells[0].get_text(strip=True)
+        if not book_name or len(cells) < 16:
+            continue
 
-    n = len(xs)
-    x_mean = sum(xs) / n
-    y_mean = sum(ys) / n
-    ss_xy = sum((xs[i] - x_mean) * (ys[i] - y_mean) for i in range(n))
-    ss_xx = sum((xs[i] - x_mean) ** 2 for i in range(n))
+        def get_current(cell):
+            raw = cell.decode_contents().split("<table")[0]
+            m = re.search(r"(\d\.\d+)", raw)
+            return float(m.group()) if m else None
 
-    if ss_xx == 0:
-        return {"error": "Varianza nulla"}
+        def get_history_flat(start_idx):
+            """Read flat history cells: [date | quote | diff]* 'Opening odds' date quote"""
+            history = []
+            i = start_idx
+            while i < len(cells):
+                txt = cells[i].get_text(strip=True)
+                if txt == "Opening odds":
+                    if i + 2 < len(cells):
+                        m = re.search(r"(\d\.\d+)", cells[i + 2].get_text())
+                        if m:
+                            history.append({"time": "open", "q": float(m.group())})
+                    break
+                elif re.match(r"\d{2}\.\d{2}\.", txt):
+                    if i + 1 < len(cells):
+                        m = re.search(r"(\d\.\d+)", cells[i + 1].get_text())
+                        if m:
+                            history.append({"time": txt, "q": float(m.group())})
+                    i += 3
+                    continue
+                i += 1
+            return history
 
-    b = ss_xy / ss_xx
-    a = y_mean - b * x_mean
+        home_current = get_current(cells[1])
+        # Home history starts at cell 2
+        home_history = get_history_flat(2)
+        home_open = next((h["q"] for h in home_history if h["time"] == "open"), None)
 
-    y_pred = [a + b * x for x in xs]
-    ss_res = sum((ys[i] - y_pred[i]) ** 2 for i in range(n))
-    ss_tot = sum((ys[i] - y_mean) ** 2 for i in range(n))
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+        # Find away block (next cell with odds-in div after home block)
+        away_current = None
+        away_cell_idx = None
+        for ci in range(2, len(cells)):
+            raw = cells[ci].decode_contents()
+            if "odds-in" in raw:
+                m = re.search(r"(\d\.\d+)", raw.split("<table")[0])
+                if m:
+                    away_current = float(m.group())
+                    away_cell_idx = ci + 1  # history starts after this cell
+                    break
 
-    fair_value_fav = None
-    if und_rank:
-        ln_p = a + b * math.log(und_rank)
-        fair_value_fav = round(1 / math.exp(ln_p), 3)
+        away_history = get_history_flat(away_cell_idx) if away_cell_idx else []
+        away_open = next((h["q"] for h in away_history if h["time"] == "open"), None)
+
+        if home_current is None:
+            continue
+
+        books[book_name] = {
+            "home_current": home_current,
+            "away_current": away_current,
+            "home_open": home_open,
+            "away_open": away_open,
+            "home_history": home_history,
+            "away_history": away_history,
+        }
+
+    if not books:
+        return {"error": "Nessun bookmaker estratto"}
+
+    # ── Calcoli ──
+    retail = {k: v for k, v in books.items() if k not in RETAIL_EXCLUDE}
+    pinnacle = books.get("Pinnacle", {})
+
+    def mean(vals):
+        vals = [v for v in vals if v]
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    retail_home_curr = mean([v["home_current"] for v in retail.values()])
+    retail_away_curr = mean([v["away_current"] for v in retail.values()])
+    retail_home_open = mean([v["home_open"] for v in retail.values() if v["home_open"]])
+    retail_away_open = mean([v["away_open"] for v in retail.values() if v["away_open"]])
+
+    # Max quote attuali su entrambi i lati (tra tutti i book)
+    all_home = [v["home_current"] for v in books.values() if v["home_current"]]
+    all_away = [v["away_current"] for v in books.values() if v["away_current"]]
+    max_home = max(all_home) if all_home else None
+    max_away = max(all_away) if all_away else None
+    max_home_book = next((k for k, v in books.items() if v["home_current"] == max_home), "")
+    max_away_book = next((k for k, v in books.items() if v["away_current"] == max_away), "")
+
+    # Pinnacle vs retail (outlier check)
+    pinn_home_curr = pinnacle.get("home_current")
+    pinn_away_curr = pinnacle.get("away_current")
+    pinn_home_open = pinnacle.get("home_open")
+    pinn_away_open = pinnacle.get("away_open")
+
+    gap_home = round(pinn_home_curr - retail_home_curr, 3) if pinn_home_curr and retail_home_curr else None
+    gap_away = round(pinn_away_curr - retail_away_curr, 3) if pinn_away_curr and retail_away_curr else None
+
+    # Pinnacle outlier: Pinnacle >= max retail sul quel lato
+    retail_home_max = max([v["home_current"] for v in retail.values() if v["home_current"]], default=None)
+    retail_away_max = max([v["away_current"] for v in retail.values() if v["away_current"]], default=None)
+    outlier_home = pinn_home_curr and retail_home_max and (pinn_home_curr >= retail_home_max - 0.01)
+    outlier_away = pinn_away_curr and retail_away_max and (pinn_away_curr >= retail_away_max - 0.01)
+
+    # Drift Pinnacle
+    pinn_drift_home = round(pinn_home_curr - pinn_home_open, 3) if pinn_home_curr and pinn_home_open else None
+    pinn_drift_away = round(pinn_away_curr - pinn_away_open, 3) if pinn_away_curr and pinn_away_open else None
+
+    # Retail drift
+    retail_drift_home = round(retail_home_curr - retail_home_open, 3) if retail_home_curr and retail_home_open else None
+    retail_drift_away = round(retail_away_curr - retail_away_open, 3) if retail_away_curr and retail_away_open else None
 
     return {
-        "a": round(a, 4), "b": round(b, 4),
-        "r2": round(r2, 3),
-        "fair_value_fav": fair_value_fav,
-        "n_rows": n
+        "home_name": home_name,
+        "away_name": away_name,
+        "match_info": match_info,
+        "books": books,
+        "pinnacle": {
+            "home_curr": pinn_home_curr,
+            "away_curr": pinn_away_curr,
+            "home_open": pinn_home_open,
+            "away_open": pinn_away_open,
+            "drift_home": pinn_drift_home,
+            "drift_away": pinn_drift_away,
+            "outlier_home": outlier_home,
+            "outlier_away": outlier_away,
+        },
+        "retail": {
+            "home_curr": retail_home_curr,
+            "away_curr": retail_away_curr,
+            "home_open": retail_home_open,
+            "away_open": retail_away_open,
+            "drift_home": retail_drift_home,
+            "drift_away": retail_drift_away,
+        },
+        "max_home": {"q": max_home, "book": max_home_book},
+        "max_away": {"q": max_away, "book": max_away_book},
+        "gap_pinn_vs_retail": {"home": gap_home, "away": gap_away},
     }
 
 
-def analyze_tennis(user: dict, protocol_text: str) -> tuple:
-    """Analisi tennis v2.1. Ritorna (testo_analisi, html_grafico_o_None, filename_html)."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# ─────────────────────────────────────────────
+# SYSTEM PROMPT ANALISI
+# ─────────────────────────────────────────────
 
-    # OLS (opzionale)
-    ols_info = "\nOLS: Non fornito — step opzionale non eseguito."
-    if user["ols_dataset"]:
-        parsed = parse_ols_dataset(user["ols_dataset"])
-        if parsed["rows"] and parsed["und_rank"]:
-            ols_result = run_ols(parsed)
-            ols_info = f"""
-OLS DATASET (step opzionale):
-- FAV rank UTR: {parsed['fav_rank']}
-- UND rank UTR: {parsed['und_rank']}
-- Righe storiche: {len(parsed['rows'])}
-- Fair value FAV: {ols_result.get('fair_value_fav')}
-- R²: {ols_result.get('r2')}
+SYSTEM_PROMPT = """Sei un analista di scommesse tennis specializzato nel flusso sharp money Pinnacle.
 
-REGOLA OLS DIREZIONE (MAI SBAGLIARE):
-- fair_value_FAV > Pinnacle_FAV → modello vede FAV sottovalutato → segnale PRO FAV
-- fair_value_FAV < Pinnacle_FAV → modello vede FAV sopravvalutato → segnale PRO UND
-- OLS converge con segnale Pinnacle → Punto 5 OLS ATTIVO; diverge → NON ATTIVO
-"""
-        else:
-            ols_info = "\nOLS: Dataset insufficiente (minimo 3 righe)."
+Ricevi dati strutturati da TennisExplorer (e opzionalmente OCR da screenshot AsianOdds) e produci un'analisi completa.
 
-    # HTML grezzo (max 80000 chars) — nessun parsing, direttamente a Claude
-    html_raw = ""
-    if user["html_source"]:
-        html_raw = f"\n\nHTML GREZZO TENNISEXPLORER (max 80000 chars):\n{user['html_source'][:80000]}"
+## SEGNALI DA VALUTARE (max 3 segnali meccanici + OLS opzionale)
 
-    system_prompt = f"""Sei un analista betting tennis. Applica il Protocollo LBA — Pinnacle Workflow v2.1 in modo preciso.
+### Segnale 1 — FLUSSO PINNACLE (obbligatorio)
+- Pinnacle drift home: se scende → soldi su Home → segnale PRO Away
+- Pinnacle drift away: se scende → soldi su Away → segnale PRO Home
+- Regola: quota che SCENDE su Pinnacle = soldi che entrano su quel lato = segnale sull'ALTRO lato
+- Forza: |drift| > 0.10 = forte, 0.05-0.10 = medio, < 0.05 = debole
 
-=== DEFINIZIONI BASE ===
-- K1 = primo giocatore elencato nella pagina
-- K2 = secondo giocatore elencato
-- FAV = giocatore con quota Pinnacle PIÙ BASSA
-- UND = giocatore con quota Pinnacle PIÙ ALTA
-- Gap = Pinnacle_now − avg_retail_now (su quel segno)
-- avg_retail = media ESCLUDENDO Pinnacle e Betfair
-- Soglia gap: ≥10 tick (0.10) forte · 5-9 tick zona grigia · <5 sub-soglia
+### Segnale 2 — OUTLIER PINNACLE (obbligatorio)
+- Se Pinnacle è il book con quota MAX su un lato = non ha paura dell'esposizione su quel lato = soldi sharp sull'altro
+- Es: Pinnacle MAX su Away → sharp money su Home → segnale PRO Home
+- Verifica con gap Pinnacle vs media retail
 
-=== I 5 PUNTI DI ANALISI ===
+### Segnale 3 — DRIFT RETAIL (obbligatorio)
+- Media retail apertura vs attuale: in quale direzione si è mosso il mercato?
+- Convergenza o divergenza col drift Pinnacle?
+- Se retail e Pinnacle driftano nella stessa direzione = segnale più forte
 
-PUNTO 1 — Gap attuale Pinnacle vs retail
-- Pinnacle MAX su X di ≥10 tick → non vuole esposizione su X → segnale PRO Y
-- 5-9 tick → zona grigia, segnale debole
-- <5 tick → sub-soglia
+### Segnale 4 — OLS (opzionale, solo se dati storici forniti)
+- Confronto forecast OLS vs Pinnacle attuale sul soggetto
+- forecast < mercato → mercato quota soggetto più alto del modello → non ha paura di ricevere gioco sul soggetto → sharp sull'avversario → SEGNALE PRO avversario
+- forecast > mercato → mercato quota soggetto più basso del modello → non ha paura di ricevere gioco sull'avversario → sharp sul soggetto → SEGNALE PRO soggetto
+- Aggiungi come 4° segnale con R² e Δ%
 
-PUNTO 2 — Comportamento retail (Δ apertura → attuale)
-- Calcola Δ_retail_K1 = avg_now_K1 - avg_open_K1
-- Retail stesso senso sharp → conferma; direzione opposta → più robusto; fermo → molto robusto
+## OUTPUT FORMAT (Telegram markdown)
 
-PUNTO 3 — Leadership apertura (chi muove per primo)
-- lag = Pinnacle_open - avg_retail_ante_Pinnacle
-- lag < -0.05 → GUIDA (gap = segnale sharp puro)
-- -0.05 ≤ lag ≤ +0.10 → RECEPISCE (gap valido)
-- lag > +0.10 → INSEGUE (gap potenzialmente artefatto → leggere Punto 4)
+```
+🎾 [TORNEO] — [ROUND] | [SUPERFICIE]
+📅 [DATA] | [ORA]
+🇮🇹 [HOME] vs [AWAY] 🏳️
 
-PUNTO 4 — Drift e timing Pinnacle
-- Δ_Pinnacle_K1 = Pinnacle_now_K1 - Pinnacle_open_K1
-- X scende nel tempo → PRO X; X sale → PRO Y; flat → neutro
-- Timing: pre-match (ultime 2h) = peso massimo; notte = peso alto; apertura = medio
+[Testo narrativo 2-3 righe: descrivi il flusso in modo chiaro. Inizia sempre dal dato più forte. Mai gergo tecnico grezzo — racconta cosa sta succedendo.]
 
-PUNTO 5 — Direzionalità
-- Unidirezionale → segnale forte; con rimbalzo → indebolito; flat → neutro
-- Rimbalzo pre-match = segnale originale indebolito
+⭐ Flusso Pinnacle: ★★★☆☆
+⭐ Outlier: ★★★★☆
+⭐ Drift retail: ★★★☆☆
+⭐ OLS: N/A (o ★★★★★ se disponibile)
 
-=== SCORING CONVERGENZA ===
-- 4-5 punti stessa direzione → GIOCA
-- 3 punti + gap ≥10 tick → GIOCA
-- 2-3 punti + gap zona grigia → ATTENZIONE (stake ridotto)
-- 0-1 punti / gap sub-soglia → NO BET
-- Rimbalzo pre-match → NO BET o rivalutare
+🎯 [GIOCATORE SEGNALATO] | Quota ~[QUOTA MAX]
+📦 Stake: [0.5% standard | 0.8% forte | 1.0% molto forte]
 
-=== OUTPUT PARTE 1 — ANALISI TESTUALE ===
-Produci questa analisi:
+✅ BET / ❌ NO BET — [N]/[TOT] segnali convergenti
+```
 
-MATCH: [K1] vs [K2] · [Torneo] · [Data] · [Superficie]
-FAV: [nome] | Pinnacle now: [x.xx] | Pinnacle open: [x.xx] | avg retail now: [x.xx] ([N] book) | Gap: [±x.xx]
-UND: [nome] | Pinnacle now: [x.xx] | Pinnacle open: [x.xx] | avg retail now: [x.xx] ([N] book) | Gap: [±x.xx]
+## REGOLE STAKE
+- 1/3 segnali convergenti → NO BET
+- 2/3 segnali convergenti → 0.5% bankroll
+- 3/3 segnali convergenti → 0.8%
+- 3/3 + OLS convergente → 1.0%
 
-PUNTO 1 · Gap: [✓/—/✗] [descrizione + tick] → PRO [nome] / zona grigia / sub-soglia
-PUNTO 2 · Retail: [✓/—/✗] [Δ_K1 e Δ_K2] → [segue/diverge/fermo]
-PUNTO 3 · Leadership: [GUIDA/RECEPISCE/INSEGUE] — lag=[x.xx] → [impatto sul gap]
-PUNTO 4 · Drift+timing: [✓/—/✗] Δ_FAV=[x.xx] Δ_UND=[x.xx] · timing=[fase] → PRO [nome] / neutro
-PUNTO 5 · Direzionalità: [UNIDIREZIONALE/RIMBALZO/FLAT] → [forte/indebolito/neutro]
+## REGOLA QUOTA MAX
+Usa sempre la quota MAX attuale sul lato segnalato (dal campo max_home o max_away nei dati).
 
-CONVERGENZA: [N]/5 punti PRO [nome] · gap max [x.xx]
-VERDICT: GIOCA [nome] @ [quota] [stake]u / ATTENZIONE [nome] @ [quota] [stake ridotto]u / NO BET
+Rispondi SOLO con il messaggio formattato. Zero spiegazioni aggiuntive."""
 
----
 
-=== OUTPUT PARTE 2 — FILE HTML ===
-Dopo l'analisi testuale, produci il blocco delimitato esattamente così:
+# ─────────────────────────────────────────────
+# ANALISI CON CLAUDE
+# ─────────────────────────────────────────────
 
-HTML_OUTPUT_START
-[file HTML completo standalone]
-HTML_OUTPUT_END
+def build_data_summary(data: dict) -> str:
+    """Costruisce il testo dati da passare a Claude."""
+    p = data["pinnacle"]
+    r = data["retail"]
+    g = data["gap_pinn_vs_retail"]
 
-Il file HTML deve rispettare queste specifiche obbligatorie:
+    lines = [
+        f"MATCH: {data['home_name']} (Home) vs {data['away_name']} (Away)",
+        f"INFO: {data.get('match_info', 'N/A')[:150]}",
+        "",
+        "=== QUOTA MAX ATTUALE (best odds) ===",
+        f"Home MAX: {data['max_home']['q']} ({data['max_home']['book']})",
+        f"Away MAX: {data['max_away']['q']} ({data['max_away']['book']})",
+        "",
+        "=== PINNACLE ===",
+        f"Home: apertura={p['home_open']} → attuale={p['home_curr']} | drift={p['drift_home']}",
+        f"Away: apertura={p['away_open']} → attuale={p['away_curr']} | drift={p['drift_away']}",
+        f"Outlier Home (Pinnacle=MAX): {p['outlier_home']}",
+        f"Outlier Away (Pinnacle=MAX): {p['outlier_away']}",
+        "",
+        "=== RETAIL MEDIA ===",
+        f"Home: apertura={r['home_open']} → attuale={r['home_curr']} | drift={r['drift_home']}",
+        f"Away: apertura={r['away_open']} → attuale={r['away_curr']} | drift={r['drift_away']}",
+        "",
+        "=== GAP PINNACLE vs RETAIL ===",
+        f"Home: {g['home']} (positivo = Pinnacle più alto di retail su Home)",
+        f"Away: {g['away']} (positivo = Pinnacle più alto di retail su Away)",
+        "",
+        "=== TUTTI I BOOKMAKER (current) ===",
+    ]
 
-STRUTTURA (in ordine):
-1. Match header: nome match · torneo · data · ora · superficie
-2. Verdict Box: pallini ✓/—/✗ per i 5 punti + verdetto GIOCA/ATTENZIONE/NO BET + griglia metriche
-3. Grafico Chart.js con 6 dataset:
-   - Curva solida FAV Pinnacle (verde #2E7D32)
-   - Curva solida UND Pinnacle (rosso #C62828)
-   - Tratteggiata [6,4] avg_now FAV (verde, opacity 0.5)
-   - Tratteggiata [6,4] avg_now UND (rosso, opacity 0.5)
-   - Tratteggiata [2,4] avg_open FAV (verde, opacity 0.15)
-   - Tratteggiata [2,4] avg_open UND (rosso, opacity 0.15)
-   I punti del grafico devono essere colorati: verde se quota scende, rosso se sale, grigio per il primo punto
-4. Card metriche (griglia 2 colonne): quota attuale, avg retail, gap (rosso≥10tick, arancio 5-9, grigio<5), Δ Pinnacle, Δ retail
-5. Tabella 5 punti: numero, nome, badge colorato ✓/—/✗
-6. Timeline Pinnacle: riga per rilevazione con pallino fase (mattina=blu, pomeriggio=arancio, sera=rosso, notte=viola), barra proporzionale, delta, evidenzia rimbalzi in #FFF8E1
+    for book, v in data["books"].items():
+        lines.append(f"{book}: Home={v['home_current']} Away={v['away_current']}")
 
-COLORI VERDETTO: GIOCA → #2E7D32 · ATTENZIONE → #E65100 · NO BET → #999
-TECNICO: Chart.js 4.4.1 da cdnjs · font -apple-system · bg body #f8f8f6 · card bg #fff con box-shadow 0 1px 4px · border-radius 10px · padding body 12px · mobile-first 375px
+    return "\n".join(lines)
 
-NOME FILE (includi in un commento HTML <!-- filename: cognome_k1_cognome_k2_pinnacle.html -->)
 
-PROTOCOLLO COMPLETO:
-{protocol_text[:4000]}"""
+async def analyze(data_summary: str, extra_context: str = "") -> str:
+    """Chiama Claude per l'analisi."""
+    user_msg = data_summary
+    if extra_context:
+        user_msg += f"\n\n=== DATI AGGIUNTIVI (screenshot/OCR) ===\n{extra_context}"
 
-    instruction = f"""Analizza il match tennis con il Pinnacle Workflow v2.1.
-{ols_info}
-{html_raw}"""
-
-    content = []
-    for img_bytes in user["images"]:
-        image_b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
-        media_type = detect_media_type(img_bytes)
-        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}})
-    content.append({"type": "text", "text": instruction})
-
-    message = client.messages.create(
+    response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=8000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": content}],
+        max_tokens=1000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}]
     )
-    full_response = message.content[0].text
+    return response.content[0].text
 
-    # Estrai HTML dal blocco delimitato
-    html_chart = None
-    filename_html = "pinnacle_drift.html"
-    html_match = re.search(r'HTML_OUTPUT_START\s*(.*?)\s*HTML_OUTPUT_END', full_response, re.DOTALL)
-    if html_match:
-        html_chart = html_match.group(1).strip()
-        # Estrai filename dal commento HTML se presente
-        fn_match = re.search(r'filename:\s*([\w_-]+\.html)', html_chart)
-        if fn_match:
-            filename_html = fn_match.group(1)
 
-    # Testo analisi = tutto prima di HTML_OUTPUT_START
-    clean_text = re.sub(r'\s*HTML_OUTPUT_START.*$', '', full_response, flags=re.DOTALL).strip()
-
-    return clean_text, html_chart, filename_html
-
-def analyze_soccer(user: dict, protocol_text: str) -> str:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    content = []
-    for img_bytes in user["images"]:
-        image_b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
-        media_type = detect_media_type(img_bytes)
-        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}})
-    content.append({"type": "text", "text": "Analizza questo screenshot calcio applicando il protocollo Soccer Model. Concludi SEMPRE con il VERDICT block."})
-
-    message = client.messages.create(
+async def analyze_screenshot(image_b64: str, mime: str) -> str:
+    """OCR + analisi da screenshot AsianOdds (senza HTML)."""
+    response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2500,
-        system=f"""Sei un analista betting calcio. Applica il protocollo Soccer Model.
-PROTOCOLLO:
-{protocol_text}
-Rispondi SEMPRE in italiano. SEMPRE includi il VERDICT finale.""",
-        messages=[{"role": "user", "content": content}],
+        max_tokens=1500,
+        system=SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mime, "data": image_b64}
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Sei un analista di scommesse tennis. Dalla screenshot di AsianOdds estrai:\n"
+                        "1. Nomi giocatori\n"
+                        "2. Tutte le quote per bookmaker (Home e Away)\n"
+                        "3. Identifica Pinnacle e la sua posizione vs gli altri\n"
+                        "4. Calcola media retail (escludi Pinnacle, Betfair, SBOBET)\n"
+                        "5. Identifica quota MAX su entrambi i lati\n"
+                        "6. Verifica se Pinnacle è outlier (MAX su un lato)\n\n"
+                        "Poi produci l'analisi completa nel formato richiesto.\n"
+                        "Se vedi anche il grafico Pinnacle con la timeline, analizza anche il drift."
+                    )
+                }
+            ]
+        }]
     )
-    return message.content[0].text
+    return response.content[0].text
 
-async def send_long_message(update: Update, text: str):
-    for chunk in split_message(text):
-        await update.message.reply_text(chunk)
 
-HELP_TEXT = (
-    "👋 *Betting Analysis Bot*\n\n"
-    "Seleziona lo sport:\n\n"
-    "⚽ Scrivi *soccer*\n"
-    "🎾 Scrivi *tennis*\n\n"
-    "Scrivi *reset* per ricominciare."
-)
+# ─────────────────────────────────────────────
+# USER STATE (per combinare HTML + screenshot)
+# ─────────────────────────────────────────────
 
-OLS_FORMAT_HELP = (
-    "📐 *Dataset OLS* (opzionale):\n\n"
-    "```\n"
-    "fav: 285\n"
-    "und: 310\n"
-    "avversari passati:\n"
-    "237 153 259\n"
-    "198 210 180\n"
-    "```\n\n"
-    "• `fav:` → rank UTR FAV oggi\n"
-    "• `und:` → rank UTR UND oggi\n"
-    "• Righe: q\\_fav q\\_avv rank\\_avv (÷100 per quota)\n\n"
-    "Oppure scrivi *no* per procedere senza OLS."
-)
+user_state: dict[int, dict] = {}
+
+def get_state(uid: int) -> dict:
+    if uid not in user_state:
+        user_state[uid] = {"html_data": None, "pending_photo": None, "ols_data": None}
+    return user_state[uid]
+
+
+# ─────────────────────────────────────────────
+# HANDLERS TELEGRAM
+# ─────────────────────────────────────────────
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎾 *Tennis Bet Analyzer v3.0*\n\n"
+        "Manda:\n"
+        "• HTML TennisExplorer (come documento .html)\n"
+        "• Screenshot AsianOdds (come foto)\n"
+        "• Entrambi per analisi completa\n\n"
+        "Digita /reset per azzerare lo stato.",
+        parse_mode="Markdown"
+    )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user_state[uid] = {"html_data": None, "pending_photo": None, "ols_data": None}
+    await update.message.reply_text("✅ Stato azzerato.")
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user = get_user(user_id)
-
-    if not user["sport"]:
-        await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
-        return
-
+    uid = update.effective_user.id
+    state = get_state(uid)
     doc = update.message.document
-    if not doc:
+
+    if not doc.file_name.endswith(".html"):
+        await update.message.reply_text("❌ Manda un file .html di TennisExplorer.")
         return
 
-    filename = doc.file_name or ""
-    ext = filename.lower().split(".")[-1] if "." in filename else ""
+    await update.message.reply_text("⏳ Parsing HTML...")
+    file = await doc.get_file()
+    html_bytes = await file.download_as_bytearray()
+    html = html_bytes.decode("utf-8", errors="replace")
 
-    if user["sport"] == "tennis" and ext in ("html", "htm", "txt"):
-        file = await context.bot.get_file(doc.file_id)
-        file_bytes = await file.download_as_bytearray()
-        raw = file_bytes.decode("utf-8", errors="ignore")
-        # HTML grezzo direttamente a Claude — nessun parsing locale
-        user["html_source"] = raw[:80000]
-        user["state"] = STATE_WAITING_OLS
-        html_len = len(user["html_source"])
-        logger.info(f"[DOC] user_id={user_id} html_source len={html_len} state={user['state']}")
-        await update.message.reply_text(
-            f"📄 File *{filename}* caricato ({html_len} chars).\n\n" + OLS_FORMAT_HELP,
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text("⚠️ Formato non supportato. Allega un file .html o .txt con le quote.")
+    data = parse_tennisexplorer(html)
+
+    if "error" in data:
+        await update.message.reply_text(f"❌ Errore parsing: {data['error']}")
+        return
+
+    state["html_data"] = data
+
+    summary = (
+        f"✅ HTML parsato: *{data['home_name']} vs {data['away_name']}*\n"
+        f"📊 Pinnacle Home: {data['pinnacle']['home_open']} → {data['pinnacle']['home_curr']} "
+        f"(drift {data['pinnacle']['drift_home']})\n"
+        f"📊 Pinnacle Away: {data['pinnacle']['away_open']} → {data['pinnacle']['away_curr']} "
+        f"(drift {data['pinnacle']['drift_away']})\n"
+        f"🔝 MAX Home: {data['max_home']['q']} ({data['max_home']['book']})\n"
+        f"🔝 MAX Away: {data['max_away']['q']} ({data['max_away']['book']})\n\n"
+        "Manda screenshot AsianOdds per completare, oppure scrivi *go* per analizzare subito."
+    )
+    await update.message.reply_text(summary, parse_mode="Markdown")
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user = get_user(user_id)
+    uid = update.effective_user.id
+    state = get_state(uid)
 
-    if not user["sport"]:
-        await update.message.reply_text("⚠️ Seleziona prima lo sport: scrivi *soccer* o *tennis*.")
-        return
+    await update.message.reply_text("⏳ Analisi in corso...")
 
     photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    image_bytes = await file.download_as_bytearray()
-    user["images"].append(bytes(image_bytes))
-    count = len(user["images"])
-    sport_emoji = "⚽" if user["sport"] == "soccer" else "🎾"
+    file = await photo.get_file()
+    img_bytes = await file.download_as_bytearray()
+    img_b64 = base64.b64encode(img_bytes).decode()
 
-    if user["sport"] == "tennis" and user["state"] == STATE_SPORT_SELECTED:
-        user["state"] = STATE_WAITING_OLS
-        await update.message.reply_text(
-            f"📥 Screenshot {count} ricevuto ({sport_emoji} TENNIS).\n\n" + OLS_FORMAT_HELP,
-            parse_mode="Markdown"
+    if state["html_data"]:
+        # Abbiamo già l'HTML — usiamo OCR solo come contesto aggiuntivo
+        ocr_response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                    {"type": "text", "text": "Estrai dal grafico Pinnacle (timeline): snapshot con orario e quota per Home e Away. Formato: HH:MM Home=X.XX Away=X.XX per ogni riga visibile. Solo i dati, niente altro."}
+                ]
+            }]
         )
-    elif user["sport"] == "tennis" and user["state"] == STATE_WAITING_OLS:
-        await update.message.reply_text(
-            f"📥 Screenshot {count} aggiunto.\n"
-            f"Manda il dataset OLS oppure scrivi *no* per procedere senza.",
-            parse_mode="Markdown"
-        )
+        extra = ocr_response.content[0].text
+        data_summary = build_data_summary(state["html_data"])
+        result = await analyze(data_summary, extra_context=extra)
     else:
-        if user["state"] == STATE_SPORT_SELECTED:
-            user["state"] = STATE_READY
-        await update.message.reply_text(
-            f"📥 Screenshot {count} ricevuto ({sport_emoji} {user['sport'].upper()}).\n\n"
-            f"Manda altri screenshot oppure scrivi *analizza*."
-        )
+        # Solo screenshot
+        result = await analyze_screenshot(img_b64, "image/jpeg")
+
+    state["html_data"] = None  # reset dopo analisi
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
+
+# ─────────────────────────────────────────────
+# OLS ENGINE
+# ─────────────────────────────────────────────
+
+def no_vig(q1: float, q2: float) -> tuple[float, float]:
+    """Rimuove il vig, ritorna quote fair decimali (non probabilità)."""
+    p1, p2 = 1/q1, 1/q2
+    tot = p1 + p2
+    return round(1/(p1/tot), 4), round(1/(p2/tot), 4)
+
+def ols_simple(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
+    """OLS lineare: y = a + b*x. Ritorna (a, b, r2)."""
+    n = len(xs)
+    if n < 2:
+        return 0, 0, 0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    ssxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    ssxx = sum((x - mx) ** 2 for x in xs)
+    if ssxx == 0:
+        return my, 0, 0
+    b = ssxy / ssxx
+    a = my - b * mx
+    y_pred = [a + b * x for x in xs]
+    ss_res = sum((y - yp) ** 2 for y, yp in zip(ys, y_pred))
+    ss_tot = sum((y - my) ** 2 for y in ys)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+    return round(a, 6), round(b, 6), round(r2, 4)
+
+def classify_delta(delta_pct: float) -> str:
+    a = abs(delta_pct)
+    if a < 5:
+        return "Sub-threshold"
+    elif a < 12:
+        return "Debole"
+    elif a < 22:
+        return "Moderato"
+    else:
+        return "Forte"
+
+def parse_ols_input(text: str) -> dict:
+    """
+    Formato input:
+      ols par 106 ava 276   (o varianti: ols\n106 276)
+      150 250 204
+      172 200 176
+      ...
+    Colonne righe storiche: q_sogg q_avv rank_avv (valori ×100 o decimali)
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    
+    # Prima riga: estrai rank soggetto e rank avversario oggi
+    first = lines[0].lower()
+    nums_first = re.findall(r"\d+\.?\d*", first)
+    if len(nums_first) < 2:
+        return {"error": "Prima riga deve contenere rank soggetto e rank avversario (es: ols par 106 ava 276)"}
+    
+    rank_subj = float(nums_first[-2])
+    rank_opp = float(nums_first[-1])
+    
+    # Righe storiche
+    rows = []
+    for line in lines[1:]:
+        nums = re.findall(r"\d+\.?\d*", line)
+        if len(nums) < 3:
+            continue
+        q_s, q_o, rank_a = float(nums[0]), float(nums[1]), float(nums[2])
+        # Se valori > 10 sono ×100
+        if q_s > 10:
+            q_s /= 100
+        if q_o > 10:
+            q_o /= 100
+        rows.append((q_s, q_o, rank_a))
+    
+    if len(rows) < 3:
+        return {"error": f"Servono almeno 3 righe storiche, trovate {len(rows)}"}
+    
+    # No-vig e costruzione dataset OLS
+    xs, ys = [], []
+    for q_s, q_o, rank_a in rows:
+        fair_s, _ = no_vig(q_s, q_o)
+        # Cap rank a 1500
+        rank_cap = min(rank_a, 1500)
+        xs.append(math.log(rank_cap))
+        ys.append(math.log(fair_s))
+    
+    a, b, r2 = ols_simple(xs, ys)
+    
+    # Forecast oggi
+    rank_opp_cap = min(rank_opp, 1500)
+    log_forecast = a + b * math.log(rank_opp_cap)
+    forecast = round(math.exp(log_forecast), 3)
+    
+    return {
+        "subject": "soggetto",
+        "rank_subj": rank_subj,
+        "rank_opp": rank_opp,
+        "rows": rows,
+        "a": a, "b": b, "r2": r2,
+        "forecast": forecast,
+        "delta_pct": None,  # calcolato dopo con Pinnacle attuale
+        "classification": None,
+    }
+
+def finalize_ols(ols_data: dict, pinnacle_q: float) -> dict:
+    """Calcola Δ% tra forecast OLS e Pinnacle attuale."""
+    if not pinnacle_q:
+        return ols_data
+    delta_pct = round((ols_data["forecast"] - pinnacle_q) / pinnacle_q * 100, 2)
+    ols_data["delta_pct"] = delta_pct
+    ols_data["pinnacle_q"] = pinnacle_q
+    ols_data["classification"] = classify_delta(delta_pct)
+    return ols_data
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user = get_user(user_id)
+    uid = update.effective_user.id
+    state = get_state(uid)
     text = update.message.text.strip()
-    text_lower = text.lower()
 
-    # Sport selection
-    if text_lower in ("soccer", "tennis", "ippica"):
-        reset_user(user_id)
-        user = get_user(user_id)
-        user["sport"] = text_lower
-        user["state"] = STATE_SPORT_SELECTED
-        sport_emoji = "⚽" if text_lower == "soccer" else "🎾"
+    # GO: analisi con tutto il disponibile
+    if text.lower() == "go":
+        if not state["html_data"] and not state["ols_data"]:
+            await update.message.reply_text("❌ Manda prima HTML o OLS.")
+            return
+        await update.message.reply_text("⏳ Analisi in corso...")
+        
+        ols_data = state.get("ols_data")
+        data_summary = ""
+        
+        if state["html_data"]:
+            # Finalize OLS with actual Pinnacle quote if available
+            if ols_data:
+                pinn_away = state["html_data"]["pinnacle"].get("away_curr")
+                pinn_home = state["html_data"]["pinnacle"].get("home_curr")
+                # Use away as default (soggetto spesso è l'away nel dataset)
+                pinn_q = pinn_away or pinn_home
+                ols_data = finalize_ols(ols_data, pinn_q)
+            data_summary = build_data_summary(state["html_data"])
+        
+        ols_summary = ""
+        if ols_data and ols_data.get("delta_pct") is not None:
+            ols_summary = (
+                f"\n\n=== OLS ===\n"
+                f"Soggetto rank oggi: {ols_data['rank_subj']} | Avv rank: {ols_data['rank_opp']}\n"
+                f"Forecast fair: {ols_data['forecast']} | Pinnacle attuale: {ols_data.get('pinnacle_q', 'N/A')}\n"
+                f"Δ%: {ols_data['delta_pct']:+.1f}% | R²: {ols_data['r2']} | Classificazione: {ols_data['classification']}\n"
+                f"Interpretazione: forecast {'> mercato → modello vede soggetto più forte' if ols_data['delta_pct'] > 0 else '< mercato → modello vede soggetto più debole'}"
+            )
+        
+        result = await analyze(data_summary + ols_summary)
+        state["html_data"] = None
+        state["ols_data"] = None
+        await update.message.reply_text(result, parse_mode="Markdown")
+        return
+
+    # OLS input: prima riga inizia con "ols"
+    lines = text.splitlines()
+    if lines and lines[0].lower().startswith("ols"):
+        ols_result = parse_ols_input(text)
+        if "error" in ols_result:
+            await update.message.reply_text(f"❌ OLS: {ols_result['error']}")
+            return
+        # Se abbiamo già l'HTML, finalizza subito il Δ%
+        if state["html_data"]:
+            pinn_q = state["html_data"]["pinnacle"].get("away_curr") or state["html_data"]["pinnacle"].get("home_curr")
+            ols_result = finalize_ols(ols_result, pinn_q)
+        state["ols_data"] = ols_result
+        delta_str = f"Δ%={ols_result['delta_pct']:+.1f}% ({ols_result['classification']})" if ols_result.get("delta_pct") is not None else "Δ% calcolato al go"
         msg = (
-            f"{sport_emoji} Sport selezionato: *{text_lower.upper()}*\n\n"
-            f"{'Allega il file .html o .txt con le quote TennisExplorer.' if text_lower == 'tennis' else 'Manda screenshot e poi scrivi *analizza*.'}"
+            f"✅ OLS caricato — {len(ols_result['rows'])} partite storiche\n"
+            f"Rank oggi: par={ols_result['rank_subj']} ava={ols_result['rank_opp']}\n"
+            f"📈 Forecast: *{ols_result['forecast']:.3f}* | R²={ols_result['r2']:.3f}\n"
+            f"{delta_str}\n\n"
+            "Scrivi *go* per analisi completa."
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # Reset
-    if text_lower == "reset":
-        reset_user(user_id)
-        await update.message.reply_text("🗑 Reset completato.\n\n" + HELP_TEXT, parse_mode="Markdown")
-        return
+    await update.message.reply_text(
+        "Manda:\n• HTML TennisExplorer (.html)\n• Screenshot AsianOdds (foto)\n• Blocco OLS (inizia con `ols`)\n• *go* per analizzare",
+        parse_mode="Markdown"
+    )
 
-    # No OLS
-    if text_lower in ("no", "skip") and user["sport"] == "tennis" and user["state"] == STATE_WAITING_OLS:
-        user["ols_dataset"] = None
-        user["state"] = STATE_READY
-        has_data = bool(user["images"]) or bool(user["html_source"])
-        await update.message.reply_text(
-            f"✅ Procedo senza OLS.\n"
-            f"Dati in coda: {'✅ HTML caricato' if user['html_source'] else '❌ nessun HTML'} | "
-            f"{'✅ ' + str(len(user['images'])) + ' screenshot' if user['images'] else '❌ nessuno screenshot'}\n"
-            f"Scrivi *analizza* quando pronto.",
-            parse_mode="Markdown"
-        )
-        return
 
-    # Analizza
-    if text_lower == "analizza":
-        if not user["sport"]:
-            await update.message.reply_text("⚠️ Seleziona prima lo sport.")
-            return
-        if not user["images"] and not user["html_source"]:
-            await update.message.reply_text("❌ Nessun dato. Allega prima un file HTML o screenshot.")
-            return
-        if user["sport"] == "tennis" and user["state"] == STATE_WAITING_OLS:
-            await update.message.reply_text(
-                "⚠️ Vuoi aggiungere OLS?\n\n" + OLS_FORMAT_HELP, parse_mode="Markdown"
-            )
-            return
-
-        sport = user["sport"]
-        sport_emoji = "⚽" if sport == "soccer" else "🎾"
-        await update.message.reply_text(f"🔍 Analizzo {sport_emoji} {sport.upper()}...")
-
-        try:
-            protocol = load_protocol(sport)
-            if not protocol:
-                await update.message.reply_text("❌ Errore caricamento protocollo.")
-                return
-
-            if sport == "tennis":
-                result_text, html_chart, filename_html = analyze_tennis(user, protocol)
-            else:
-                result_text = analyze_soccer(user, protocol)
-                html_chart = None
-                filename_html = None
-
-            user["images"] = []
-            user["html_source"] = None
-            user["ols_dataset"] = None
-            user["state"] = STATE_SPORT_SELECTED
-
-            await send_long_message(update, result_text)
-
-            if html_chart:
-                html_bytes = html_chart.encode("utf-8")
-                html_file = io.BytesIO(html_bytes)
-                html_file.name = filename_html
-                await update.message.reply_document(
-                    document=html_file,
-                    filename=filename_html,
-                    caption="📊 Pinnacle Workflow v2.1 — aprilo nel browser"
-                )
-
-        except Exception as e:
-            logger.error(f"Errore analisi: {e}")
-            await update.message.reply_text(f"❌ Errore: {str(e)}")
-        return
-
-    # OLS formato nuovo
-    if user["sport"] == "tennis" and user["state"] == STATE_WAITING_OLS and is_ols_format(text):
-        user["ols_dataset"] = text
-        user["state"] = STATE_READY
-        parsed = parse_ols_dataset(text)
-        await update.message.reply_text(
-            f"📐 Dataset OLS ricevuto:\n"
-            f"• FAV rank UTR: {parsed['fav_rank']}\n"
-            f"• UND rank UTR: {parsed['und_rank']}\n"
-            f"• Righe storiche: {len(parsed['rows'])}\n\n"
-            f"Scrivi *analizza* per procedere.",
-            parse_mode="Markdown"
-        )
-        return
-
-    # HTML incollato direttamente nel chat
-    if user["sport"] == "tennis" and len(text) > 100 and "<" in text and ">" in text:
-        user["html_source"] = text[:80000]
-        user["state"] = STATE_WAITING_OLS
-        await update.message.reply_text(
-            "📄 HTML ricevuto.\n\n" + OLS_FORMAT_HELP, parse_mode="Markdown"
-        )
-        return
-
-    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT, handle_text))
-    logger.info("Bot started")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    logger.info("Bot avviato")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()

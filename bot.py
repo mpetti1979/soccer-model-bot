@@ -816,7 +816,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     state["last_quota_fav"] = aq
         state["html_data"] = None
         state["ols_data"] = None
-        await update.message.reply_text(result, parse_mode="Markdown")
+        try:
+            await update.message.reply_text(result, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(result)
         return
 
     # OLS input: prima riga inizia con "ols"

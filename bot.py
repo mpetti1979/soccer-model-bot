@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
-client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 SHEET_ID = "1LFWu2qK42cVQDh9-keT23_M0tydr9CERPStKt_8OnFQ"
 SHEET_HEADERS = [
@@ -485,23 +485,22 @@ async def analyze(data_summary: str, extra_context: str = "") -> str:
 
     try:
         logger.info("Chiamata API Anthropic in corso...")
-        response = await asyncio.wait_for(
-            client.messages.create(
+        def _call():
+            return client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1000,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_msg}]
-            ),
-            timeout=30.0
-        )
+            )
+        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=60.0)
         logger.info("Risposta API ricevuta")
         return response.content[0].text
     except asyncio.TimeoutError:
-        logger.error("Timeout API Anthropic dopo 30s")
-        return "❌ Timeout analisi (30s). Riprova."
+        logger.error("Timeout API Anthropic dopo 60s")
+        return "Timeout analisi (60s). Riprova."
     except Exception as e:
-        logger.error(f"Errore API Anthropic: {type(e).__name__}: {e}")
-        return f"❌ Errore API: {type(e).__name__}: {str(e)[:200]}"
+        logger.error(f"Errore API: {type(e).__name__}: {e}")
+        return f"Errore API: {type(e).__name__}: {str(e)[:200]}"
 
 
 async def analyze_screenshot(image_b64: str, mime: str) -> str:
@@ -605,7 +604,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔝 MAX Away: {data['max_away']['q']} ({data['max_away']['book']})\n\n"
         "Manda screenshot AsianOdds per completare, oppure scrivi *go* per analizzare subito."
     )
-    await update.message.reply_text(summary, parse_mode="Markdown")
+    try:
+        await update.message.reply_text(summary, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(summary)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -621,17 +623,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state["html_data"]:
         # Abbiamo già l'HTML — usiamo OCR solo come contesto aggiuntivo
-        ocr_response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
-                    {"type": "text", "text": "Estrai dal grafico Pinnacle (timeline): snapshot con orario e quota per Home e Away. Formato: HH:MM Home=X.XX Away=X.XX per ogni riga visibile. Solo i dati, niente altro."}
-                ]
-            }]
-        )
+        def _ocr():
+            return client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=500,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                        {"type": "text", "text": "Estrai dal grafico Pinnacle (timeline): snapshot con orario e quota per Home e Away. Formato: HH:MM Home=X.XX Away=X.XX per ogni riga visibile. Solo i dati, niente altro."}
+                    ]
+                }]
+            )
+        ocr_response = await asyncio.to_thread(_ocr)
         extra = ocr_response.content[0].text
         data_summary = build_data_summary(state["html_data"])
         result = await analyze(data_summary, extra_context=extra)
@@ -842,7 +846,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{delta_str}\n\n"
             "Scrivi *go* per analisi completa."
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        try:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(msg)
         return
 
     await update.message.reply_text(
@@ -902,11 +909,14 @@ async def risultato(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if ok:
         emoji = "✅" if esito == "W" else "❌"
-        await update.message.reply_text(
-            f"{emoji} Salvato\n"
-            f"Favorito: {fav} | Quota Pinnacle: {quota_fav} | Esito: {esito} | P&L: {pl:+.2f}u",
-            parse_mode="Markdown"
-        )
+        try:
+            await update.message.reply_text(
+                f"{emoji} Salvato\n"
+                f"Favorito: {fav} | Quota Pinnacle: {quota_fav} | Esito: {esito} | P&L: {pl:+.2f}u",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await update.message.reply_text(f"{emoji} Salvato — {esito} | {fav} | {quota_fav} | P&L: {pl:+.2f}u")
         state["html_data"] = None
         state["ols_data"] = None
         state["last_verdetto"] = None
@@ -944,9 +954,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔍 *Con outlier Pinnacle* ({len(oul_rows)} bet):\n"
             f"Win rate: {round(oul_wins/len(oul_rows)*100) if oul_rows else 0}% ({oul_wins}/{len(oul_rows)})"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        try:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"❌ Errore: {e}")
+        await update.message.reply_text(f"Errore: {e}")
 
 
 # ─────────────────────────────────────────────

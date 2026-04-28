@@ -380,21 +380,21 @@ def build_tennis_summary(data: dict) -> str:
 # CLAUDE API CALLS
 # ─────────────────────────────────────────────
 
-async def claude_call(system: str, user_content) -> str:
+async def claude_call(system: str, user_content, model: str = "claude-haiku-4-5-20251001", max_tokens: int = 2000) -> str:
     """Chiama Claude con system prompt e contenuto utente (testo o lista multimodale)."""
     def _call():
         msgs = [{"role": "user", "content": user_content}]
         return client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=8000,
+            model=model,
+            max_tokens=max_tokens,
             system=system,
             messages=msgs
         )
     try:
-        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
+        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=120.0)
         return response.content[0].text
     except asyncio.TimeoutError:
-        return "⏱ Timeout analisi (90s). Riprova."
+        return "⏱ Timeout analisi (120s). Riprova con /analisi."
     except Exception as e:
         logger.error(f"Claude error: {e}")
         return f"❌ Errore API: {str(e)[:200]}"
@@ -450,45 +450,55 @@ Motivazione: [1 riga max]
 Criteri rating X/5: 5=segnale fortissimo e univoco, 4=forte, 3=moderato, 2=debole, 1=quasi assente, 0=assente o contraddittorio.
 Soglie totale (base 20): 17-20=⚡MOLTO FORTE, 13-16=✅FORTE, 8-12=⚠️MEDIO, 0-7=❌DEBOLE"""
 
-TENNIS_EXTENDED_SYSTEM = """Sei un analista senior di scommesse tennis. Applica INTEGRALMENTE il protocollo LBA Pinnacle Workflow fornito.
+TENNIS_EXTENDED_SYSTEM = """Sei un analista di scommesse tennis. La quick analysis è già stata fatta. Approfondisci SOLO i punti critici seguendo il protocollo LBA.
 
 PROTOCOLLO:
 {protocol}
 
-REGOLE CRITICHE LBA — MAI SBAGLIARE:
-1. OUTLIER: Pinnacle MAX su lato X = sharp hanno già giocato sul lato OPPOSTO. Outlier Home = PRO Away. Outlier Away = PRO Home. MAI leggere outlier come valore sul lato outlier.
-2. DRIFT: Pinnacle sale su X = sharp giocano su Y. Pinnacle scende su X = sharp giocano su X.
-3. FAV: sempre quota Pinnacle più bassa.
-4. VERDETTO FINALE coerente con i segnali convergenti.
+REGOLE CRITICHE — MAI SBAGLIARE:
+- Outlier su X = sharp su Y (opposto). MAI sul lato outlier.
+- Pinnacle sale su X = sharp su Y. Pinnacle scende su X = sharp su X.
 
-Analizza tutti i dati disponibili seguendo ogni layer del protocollo. Sii preciso e metodico.
-Sii SINTETICO per sezione: max 4-5 righe per layer. Non ricopiare i dati grezzi, interpreta direttamente.
+STRUTTURA OUTPUT — esattamente questa, niente di più:
 
-FORMATTAZIONE OUTPUT — REGOLE ASSOLUTE:
-- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo
-- NON usare mai: asterischi (**), cancelletti (##), underscore (__), pipe per tabelle (|---|)
-- Titoli sezione: <b>LAYER 1 — NOME</b>
-- Liste: trattino semplice - elemento
-- Dati su righe separate, senza tabelle
+<b>APPROFONDIMENTO LAYER</b>
 
-RATING OBBLIGATORIO — alla fine di ogni layer scrivi:
-Rating: <b>[X/5]</b> — [motivazione breve]
+<b>§2 Gap + Max quota</b>
+[1-2 righe: gap numerico, outlier, interpretazione operativa]
+Rating: <b>[X/5]</b>
 
-RIEPILOGO FINALE OBBLIGATORIO:
-<b>RIEPILOGO SEGNALI</b>
-- Outlier/Flusso sharp: <b>[X/5]</b>
-- Drift Pinnacle: <b>[X/5]</b>
-- Pattern: <b>[X/5]</b>
-- Gap Pinna/retail: <b>[X/5]</b>
-- Betfair exchange: <b>[X/5]</b> (solo se screenshot fornita, altrimenti ometti)
-- OLS: <b>[X/5]</b> (solo se dati OLS forniti, altrimenti ometti)
+<b>§3 Comportamento retail</b>
+[1-2 righe: retail segue/oppone/fermo, cosa significa]
+Rating: <b>[X/5]</b>
+
+<b>§4-5 Drift + Pattern</b>
+[1-2 righe: movimento Pinnacle, pattern, timing]
+Rating: <b>[X/5]</b>
+
+<b>§6 Posizione Pinnacle</b>
+[1 riga: GUIDA/ENTRA_TARDI/ANTICIPA/INSEGUE e peso]
+Rating: <b>[X/5]</b>
+
+[Se Betfair disponibile:]
+<b>§8 Betfair</b>
+[1-2 righe: squilibrio volume, direzione, conferma o conflitto]
+Rating: <b>[X/5]</b>
+
 ─────────────────
-Totale base: <b>[X/20]</b> [oppure X/25 o X/30 con opzionali]
+<b>STAKE LAYERS §10</b>
+- Flusso sharp (drift converge): [✅/❌] +0.25u
+- Gap≥10tick: [✅/❌] +0.25u
+- OLS (se presente): [✅/❌/N/A] +0.25u
+- Line AH (se presente): [✅/❌/N/A] +0.25u
+- Betfair (se presente): [✅/❌/N/A] +0.25u
+Stake totale: <b>[X.XX]u</b>
+
+<b>CONFLITTI/NOTE</b>
+[Solo se ci sono segnali contraddittori — altrimenti ometti questa sezione]
 
 🎯 <b>[giocatore] | [✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET]</b>
-Stake suggerito: <b>[X.XX]u</b> (1.00% bankroll base, modulato sul totale segnali)
 
-Soglie totale (base 20): 17-20=⚡MOLTO FORTE, 13-16=✅FORTE, 8-12=⚠️MEDIO, 0-7=❌DEBOLE"""
+FORMATTAZIONE: solo tag HTML Telegram. Niente asterischi, ##, tabelle pipe."""
 
 TENNIS_RECAP_SYSTEM = """Produci SOLO il recap Telegram nel formato standard LBA. Niente altro.
 
@@ -525,7 +535,7 @@ async def tennis_quick(state: dict) -> str:
     if not content or len(content) == 1:
         return "❌ Nessun dato disponibile."
 
-    return await claude_call(TENNIS_QUICK_SYSTEM, content)
+    return await claude_call(TENNIS_QUICK_SYSTEM, content, model="claude-haiku-4-5-20251001", max_tokens=1500)
 
 
 async def tennis_extended(state: dict) -> str:
@@ -545,7 +555,7 @@ async def tennis_extended(state: dict) -> str:
     if not content or len(content) == 1:
         return "❌ Nessun dato disponibile."
 
-    return await claude_call(system, content)
+    return await claude_call(system, content, model="claude-haiku-4-5-20251001", max_tokens=2000)
 
 
 async def tennis_recap(state: dict) -> str:
@@ -553,7 +563,7 @@ async def tennis_recap(state: dict) -> str:
     if not last_analysis:
         return "❌ Fai prima /analisi."
     content = [make_text_block(f"Analisi precedente:\n{last_analysis}\n\nProduci il recap Telegram.")]
-    return await claude_call(TENNIS_RECAP_SYSTEM, content)
+    return await claude_call(TENNIS_RECAP_SYSTEM, content, model="claude-haiku-4-5-20251001", max_tokens=800)
 
 
 # ─────────────────────────────────────────────
@@ -605,54 +615,50 @@ Totale: <b>[X/25]</b>
 Criteri rating X/5: 5=segnale fortissimo univoco, 4=forte, 3=moderato, 2=debole, 1=quasi assente, 0=assente/contraddittorio.
 Soglie totale /25: 21-25=⚡MOLTO FORTE, 16-20=✅FORTE, 10-15=⚠️MEDIO, 0-9=❌DEBOLE"""
 
-SOCCER_EXTENDED_SYSTEM = """Sei un analista senior di scommesse calcio. Applica INTEGRALMENTE il Soccer Model Protocol fornito con tutti i 7 layer.
+SOCCER_EXTENDED_SYSTEM = """Sei un analista di scommesse calcio. La quick analysis è già stata fatta. Approfondisci per 1X2 e U/O 2.5 seguendo il Soccer Model Protocol.
 
 PROTOCOLLO:
 {protocol}
 
-Analizza la screenshot TOS seguendo ogni layer per 1X2 e U/O 2.5. Sii preciso e metodico.
-Sii SINTETICO: max 4-5 righe per layer. Non ricopiare i dati grezzi, interpreta direttamente.
-Assegna grading finale (AAA/AA/A/B/C/NOP) per ogni selezione.
+STRUTTURA OUTPUT — esattamente questa per ogni mercato:
 
-FORMATTAZIONE OUTPUT — REGOLE ASSOLUTE:
-- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo
-- NON usare mai: asterischi (**), cancelletti (##), underscore (__), pipe per tabelle (|---|)
-- Titoli sezione: <b>LAYER 1 — NOME</b>
-- Liste: trattino semplice - elemento
-- Dati su righe separate, senza tabelle
+<b>ANALISI 1X2</b>
 
-RATING OBBLIGATORIO — alla fine di ogni layer scrivi:
-Rating: <b>[X/5]</b> — [motivazione breve]
+<b>L1 Grafico</b>: [classificazione: confermante/neutro/contraddittorio + motivazione 1 riga]
+Rating: <b>[X/5]</b>
 
-RIEPILOGO FINALE OBBLIGATORIO (per 1X2 e U/O separati):
+<b>L2 Volume</b>: [Tot Vol, Sel Vol dominante, concentrazione]
+Rating: <b>[X/5]</b>
 
-<b>RIEPILOGO 1X2</b>
-- L1 Grafico: <b>[X/5]</b>
-- L2 Volume: <b>[X/5]</b>
-- L3 bookImpDiff: <b>[X/5]</b>
-- L4 bookDiffToNow: <b>[X/5]</b>
-- L5 impDifToNow: <b>[X/5]</b>
-- L6 PinnyPrice gap: <b>[X/5]</b>
-- L7 Chart class: <b>[X/5]</b>
+<b>L3 bookImpDiff</b>: [trend dx→sx, pattern, interpretazione]
+Rating: <b>[X/5]</b>
+
+<b>L4 bookDiffToNow</b>: [positivo/negativo, stabile/cala, R.10 se applicabile]
+Rating: <b>[X/5]</b>
+
+<b>L5 impDifToNow</b>: [valore attuale, sale/scende/piatto, R.14/R.15 se applicabile]
+Rating: <b>[X/5]</b>
+
+<b>L6 PinnyPrice gap</b>: [gap%, override se applicabile]
+Rating: <b>[X/5]</b>
+
+<b>L7 Chart</b>: [confermante/neutro/contraddittorio]
+Rating: <b>[X/5]</b>
+
 ─────────────────
-Totale: <b>[X/35]</b>
+Totale 1X2: <b>[X/35]</b>
 Grading: <b>[AAA/AA/A/B/C/NOP]</b>
-🎯 Selezione: <b>[1/X/2 o NOP]</b>
+🎯 <b>[1/X/2 o NOP]</b>
 
-<b>RIEPILOGO U/O 2.5</b>
-- L1 Grafico: <b>[X/5]</b>
-- L2 Volume: <b>[X/5]</b>
-- L3 bookImpDiff: <b>[X/5]</b>
-- L4 bookDiffToNow: <b>[X/5]</b>
-- L5 impDifToNow: <b>[X/5]</b>
-- L6 PinnyPrice gap: <b>[X/5]</b>
-- L7 Chart class: <b>[X/5]</b>
+<b>ANALISI U/O 2.5</b>
+[stessa struttura L1-L7]
 ─────────────────
-Totale: <b>[X/35]</b>
+Totale U/O: <b>[X/35]</b>
 Grading: <b>[AAA/AA/A/B/C/NOP]</b>
-🎯 Selezione: <b>[Under/Over o NOP]</b>
+🎯 <b>[Under/Over o NOP]</b>
 
-Soglie grading: 30-35=AAA, 24-29=AA, 18-23=A, 12-17=B, 6-11=C, 0-5=NOP"""
+Soglie grading: 30-35=AAA, 24-29=AA, 18-23=A, 12-17=B, 6-11=C, 0-5=NOP
+FORMATTAZIONE: solo tag HTML Telegram. Niente asterischi, ##, tabelle pipe."""
 
 
 async def soccer_quick(state: dict) -> str:
@@ -665,7 +671,7 @@ async def soccer_quick(state: dict) -> str:
     for img_b64, mime in screenshots:
         content.append(make_image_block(img_b64, mime))
     content.append(make_text_block("Produci la quick analysis 1X2 e U/O 2.5 dal TOS."))
-    return await claude_call(SOCCER_QUICK_SYSTEM, content)
+    return await claude_call(SOCCER_QUICK_SYSTEM, content, model="claude-haiku-4-5-20251001", max_tokens=1500)
 
 
 async def soccer_extended(state: dict) -> str:
@@ -680,7 +686,7 @@ async def soccer_extended(state: dict) -> str:
     for img_b64, mime in screenshots:
         content.append(make_image_block(img_b64, mime))
     content.append(make_text_block("Applica il Soccer Model Protocol completo con tutti i layer. Analizza 1X2 e U/O 2.5."))
-    return await claude_call(system, content)
+    return await claude_call(system, content, model="claude-haiku-4-5-20251001", max_tokens=2000)
 
 
 # ─────────────────────────────────────────────
@@ -988,6 +994,19 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
 # ─────────────────────────────────────────────
 
 def main():
+    # Pre-carica protocolli in cache all'avvio — evita latenza alla prima richiesta
+    logger.info("Pre-caricamento protocolli da Drive...")
+    try:
+        lba = get_lba_protocol()
+        logger.info(f"LBA protocol caricato: {len(lba)} chars")
+    except Exception as e:
+        logger.error(f"Errore pre-caricamento LBA: {e}")
+    try:
+        soccer = get_soccer_protocol()
+        logger.info(f"Soccer protocol caricato: {len(soccer)} chars")
+    except Exception as e:
+        logger.error(f"Errore pre-caricamento Soccer: {e}")
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))

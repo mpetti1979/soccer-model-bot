@@ -656,7 +656,7 @@ async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Telegram ha limite 4096 chars — splitta se necessario
     for chunk in split_message(result):
         try:
-            await update.message.reply_text(chunk, parse_mode="Markdown")
+            await update.message.reply_text(chunk)
         except Exception:
             await update.message.reply_text(chunk)
 
@@ -670,7 +670,7 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Generazione recap...")
     result = await tennis_recap(state)
     try:
-        await update.message.reply_text(result, parse_mode="Markdown")
+        await update.message.reply_text(result)
     except Exception:
         await update.message.reply_text(result)
 
@@ -698,7 +698,7 @@ async def cmd_protocollo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full = header + text
     for chunk in split_message(full):
         try:
-            await update.message.reply_text(chunk, parse_mode="Markdown")
+            await update.message.reply_text(chunk)
         except Exception:
             await update.message.reply_text(chunk)
 
@@ -810,7 +810,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["last_quick"] = result
 
         try:
-            await update.message.reply_text(result, parse_mode="Markdown")
+            await update.message.reply_text(result)
         except Exception:
             await update.message.reply_text(result)
 

@@ -377,6 +377,309 @@ def build_tennis_summary(data: dict) -> str:
 
 
 # ─────────────────────────────────────────────
+# RATING DETERMINISTICO TENNIS
+# ─────────────────────────────────────────────
+
+def compute_tennis_ratings(data: dict) -> dict:
+    """
+    Calcola rating deterministici X/5 dai dati parsati.
+    Restituisce dict con rating, interpretazioni e segnale finale.
+    """
+    p = data["pinnacle"]
+    g = data["gap_pinn_vs_retail"]
+    pattern = data.get("pattern", {})
+    combo = data.get("combo", {})
+
+    results = {}
+
+    # ── 1. OUTLIER + FLUSSO SHARP ──
+    outlier_home = p.get("outlier_home", False)
+    outlier_away = p.get("outlier_away", False)
+
+    if outlier_home and not outlier_away:
+        outlier_rating = 5
+        outlier_signal = f"PRO {data['away_name']} (Away)"
+        outlier_note = f"Pinnacle MAX su Home → sharp su Away"
+    elif outlier_away and not outlier_home:
+        outlier_rating = 5
+        outlier_signal = f"PRO {data['home_name']} (Home)"
+        outlier_note = f"Pinnacle MAX su Away → sharp su Home"
+    elif outlier_home and outlier_away:
+        outlier_rating = 2
+        outlier_signal = "NEUTRO (entrambi outlier)"
+        outlier_note = "Mercato conteso"
+    else:
+        outlier_rating = 1
+        outlier_signal = "NEUTRO (nessun outlier)"
+        outlier_note = "Pinnacle non è MAX su nessun lato"
+
+    results["outlier"] = {
+        "rating": outlier_rating,
+        "signal": outlier_signal,
+        "note": outlier_note,
+        "home": outlier_home,
+        "away": outlier_away,
+    }
+
+    # ── 2. DRIFT PINNACLE ──
+    drift_home = p.get("drift_home") or 0
+    drift_away = p.get("drift_away") or 0
+
+    # Determina direzione e intensità
+    def drift_rating_single(drift):
+        abs_d = abs(drift)
+        if abs_d >= 0.10: return 5
+        elif abs_d >= 0.07: return 4
+        elif abs_d >= 0.05: return 3
+        elif abs_d >= 0.03: return 2
+        elif abs_d >= 0.01: return 1
+        else: return 0
+
+    # Segnale drift: sale su X = PRO Y, scende su X = PRO X
+    drift_signals = []
+    if abs(drift_home) >= 0.01:
+        if drift_home > 0:
+            drift_signals.append(f"Home sale {drift_home:+.2f} → PRO {data['away_name']}")
+        else:
+            drift_signals.append(f"Home scende {drift_home:+.2f} → PRO {data['home_name']}")
+    if abs(drift_away) >= 0.01:
+        if drift_away > 0:
+            drift_signals.append(f"Away sale {drift_away:+.2f} → PRO {data['home_name']}")
+        else:
+            drift_signals.append(f"Away scende {drift_away:+.2f} → PRO {data['away_name']}")
+
+    # Rating drift = max dei due lati pesato sulla convergenza
+    rh = drift_rating_single(drift_home)
+    ra = drift_rating_single(drift_away)
+
+    # Se entrambi convergono stesso lato = bonus
+    home_pro_away = drift_home > 0.01
+    away_pro_home = drift_away > 0.01
+    home_pro_home = drift_home < -0.01
+    away_pro_away = drift_away < -0.01
+
+    if (home_pro_away and away_pro_away) or (home_pro_home and away_pro_home):
+        # Doppia convergenza
+        drift_rating = min(5, max(rh, ra) + 1)
+        drift_convergence = "doppia convergenza"
+    elif drift_signals:
+        drift_rating = max(rh, ra)
+        drift_convergence = "singola"
+    else:
+        drift_rating = 0
+        drift_convergence = "nessun drift significativo"
+
+    results["drift"] = {
+        "rating": drift_rating,
+        "home": drift_home,
+        "away": drift_away,
+        "signals": drift_signals,
+        "convergence": drift_convergence,
+    }
+
+    # ── 3. PATTERN ──
+    pat_home = pattern.get("home", "FLAT")
+    pat_away = pattern.get("away", "FLAT")
+
+    PATTERN_WEIGHT = {
+        "UNI+": 4, "UNI-": 4,
+        "SPIKE": 5,
+        "INV": 2,
+        "RIM": 2,
+        "FLAT": 0,
+    }
+
+    pw_home = PATTERN_WEIGHT.get(pat_home, 0)
+    pw_away = PATTERN_WEIGHT.get(pat_away, 0)
+    pattern_rating = min(5, max(pw_home, pw_away))
+
+    # Interpretazione pattern
+    pat_notes = []
+    if pat_home == "UNI-":
+        pat_notes.append(f"Home UNI- (sale) → PRO {data['away_name']}")
+    elif pat_home == "UNI+":
+        pat_notes.append(f"Home UNI+ (scende) → PRO {data['home_name']}")
+    elif pat_home == "SPIKE":
+        pat_notes.append(f"Home SPIKE → peso massimo")
+    if pat_away == "UNI-":
+        pat_notes.append(f"Away UNI- (sale) → PRO {data['home_name']}")
+    elif pat_away == "UNI+":
+        pat_notes.append(f"Away UNI+ (scende) → PRO {data['away_name']}")
+    elif pat_away == "SPIKE":
+        pat_notes.append(f"Away SPIKE → peso massimo")
+
+    results["pattern"] = {
+        "rating": pattern_rating,
+        "home": pat_home,
+        "away": pat_away,
+        "notes": pat_notes,
+    }
+
+    # ── 4. GAP PINNACLE vs RETAIL ──
+    gap_home = g.get("home") or 0
+    gap_away = g.get("away") or 0
+    max_gap = max(abs(gap_home), abs(gap_away))
+    max_gap_ticks = round(max_gap * 100)
+
+    if max_gap_ticks >= 15:
+        gap_rating = 5
+        gap_label = "FORTE MASSIMO"
+    elif max_gap_ticks >= 10:
+        gap_rating = 4
+        gap_label = "FORTE"
+    elif max_gap_ticks >= 7:
+        gap_rating = 3
+        gap_label = "ZONA GRIGIA ALTA"
+    elif max_gap_ticks >= 5:
+        gap_rating = 2
+        gap_label = "ZONA GRIGIA"
+    else:
+        gap_rating = 1
+        gap_label = "SUB-SOGLIA"
+
+    results["gap"] = {
+        "rating": gap_rating,
+        "home": gap_home,
+        "away": gap_away,
+        "ticks": max_gap_ticks,
+        "label": gap_label,
+    }
+
+    # ── 5. COMBO (posizione Pinnacle vs retail) ──
+    combo_home = combo.get("home", "N/A")
+    combo_away = combo.get("away", "N/A")
+
+    COMBO_WEIGHT = {
+        "GUIDA": 4,
+        "ENTRA_TARDI": 4,
+        "ANTICIPA": 2,
+        "INSEGUE": 1,
+        "N/A": 0,
+    }
+    combo_rating = min(5, max(
+        COMBO_WEIGHT.get(combo_home, 0),
+        COMBO_WEIGHT.get(combo_away, 0)
+    ))
+
+    results["combo"] = {
+        "rating": combo_rating,
+        "home": combo_home,
+        "away": combo_away,
+    }
+
+    # ── TOTALE E SEGNALE FINALE ──
+    total = (
+        results["outlier"]["rating"] +
+        results["drift"]["rating"] +
+        results["pattern"]["rating"] +
+        results["gap"]["rating"]
+    )
+    max_total = 20
+
+    if total >= 17:
+        verdict_strength = "⚡ MOLTO FORTE"
+    elif total >= 13:
+        verdict_strength = "✅ FORTE"
+    elif total >= 8:
+        verdict_strength = "⚠️ MEDIO"
+    else:
+        verdict_strength = "❌ DEBOLE"
+
+    # Determina giocatore segnalato (maggioranza segnali)
+    # Conta segnali PRO home vs PRO away
+    pro_home_count = 0
+    pro_away_count = 0
+
+    # Outlier
+    if "PRO" in results["outlier"]["signal"]:
+        if "Home" in results["outlier"]["signal"]:
+            pro_home_count += results["outlier"]["rating"]
+        else:
+            pro_away_count += results["outlier"]["rating"]
+
+    # Drift
+    for sig in results["drift"]["signals"]:
+        if f"PRO {data['home_name']}" in sig:
+            pro_home_count += 1
+        elif f"PRO {data['away_name']}" in sig:
+            pro_away_count += 1
+
+    # Pattern
+    for note in results["pattern"]["notes"]:
+        if f"PRO {data['home_name']}" in note:
+            pro_home_count += 1
+        elif f"PRO {data['away_name']}" in note:
+            pro_away_count += 1
+
+    if pro_home_count > pro_away_count:
+        signal_player = data["home_name"]
+        signal_side = "Home"
+    elif pro_away_count > pro_home_count:
+        signal_player = data["away_name"]
+        signal_side = "Away"
+    else:
+        signal_player = "N/D (segnali contraddittori)"
+        signal_side = "N/D"
+
+    # Verdetto operativo
+    if total >= 13 and (pro_home_count != pro_away_count):
+        verdict = "✅ GIOCA"
+    elif total >= 8:
+        verdict = "⚠️ ATTENZIONE"
+    else:
+        verdict = "❌ NO BET"
+
+    results["total"] = total
+    results["max_total"] = max_total
+    results["strength"] = verdict_strength
+    results["signal_player"] = signal_player
+    results["signal_side"] = signal_side
+    results["verdict"] = verdict
+    results["pro_home"] = pro_home_count
+    results["pro_away"] = pro_away_count
+
+    return results
+
+
+def format_tennis_ratings(data: dict, ratings: dict) -> str:
+    """Formatta i rating calcolati in testo per il prompt Claude."""
+    lines = [
+        "=== RATING DETERMINISTICI (calcolati da Python — NON modificare) ===",
+        "",
+        f"OUTLIER: Home={ratings['outlier']['home']} Away={ratings['outlier']['away']}",
+        f"  → {ratings['outlier']['signal']}",
+        f"  → {ratings['outlier']['note']}",
+        f"  Rating: {ratings['outlier']['rating']}/5",
+        "",
+        f"DRIFT: Home={ratings['drift']['home']:+.2f} Away={ratings['drift']['away']:+.2f} [{ratings['drift']['convergence']}]",
+    ]
+    for s in ratings["drift"]["signals"]:
+        lines.append(f"  → {s}")
+    lines.append(f"  Rating: {ratings['drift']['rating']}/5")
+    lines.append("")
+    lines.append(f"PATTERN: Home={ratings['pattern']['home']} Away={ratings['pattern']['away']}")
+    for n in ratings["pattern"]["notes"]:
+        lines.append(f"  → {n}")
+    lines.append(f"  Rating: {ratings['pattern']['rating']}/5")
+    lines.append("")
+    lines.append(f"GAP: Home={ratings['gap']['home']} Away={ratings['gap']['away']} ({ratings['gap']['ticks']} tick) → {ratings['gap']['label']}")
+    lines.append(f"  Rating: {ratings['gap']['rating']}/5")
+    lines.append("")
+    lines.append(f"COMBO: Home={ratings['combo']['home']} Away={ratings['combo']['away']}")
+    lines.append(f"  Rating: {ratings['combo']['rating']}/5")
+    lines.append("")
+    lines.append("─────────────────")
+    lines.append(f"TOTALE: {ratings['total']}/{ratings['max_total']} → {ratings['strength']}")
+    lines.append(f"SEGNALE: PRO {ratings['signal_player']} ({ratings['signal_side']})")
+    lines.append(f"VERDETTO PYTHON: {ratings['verdict']}")
+    lines.append("")
+    lines.append("ISTRUZIONE: usa questi rating e questo segnale ESATTAMENTE.")
+    lines.append(f"Il verdetto finale DEVE essere su {ratings['signal_player']}.")
+    lines.append("Non puoi cambiare il segnale — puoi solo aggiungere motivazione narrativa.")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
 # CLAUDE API CALLS
 # ─────────────────────────────────────────────
 
@@ -525,17 +828,28 @@ async def tennis_quick(state: dict) -> str:
     screenshots = state.get("screenshots", [])
 
     today = datetime.now().strftime("%d/%m/%Y")
-    content = []
-    content.append(make_text_block(f"DATA PARTITA: {today}"))
+    content_parts = []
+    content_parts.append(make_text_block(f"DATA PARTITA: {today}"))
+
+    # Calcola rating deterministici se abbiamo HTML
     if html_data:
-        content.append(make_text_block("=== DATI HTML TENNISEXPLORER ===\n" + build_tennis_summary(html_data)))
+        ratings = compute_tennis_ratings(html_data)
+        state["last_ratings"] = ratings  # salva per uso futuro
+        content_parts.append(make_text_block(
+            "=== DATI HTML TENNISEXPLORER ===\n" +
+            build_tennis_summary(html_data) +
+            "\n\n" +
+            format_tennis_ratings(html_data, ratings)
+        ))
+
     for img_b64, mime in screenshots:
-        content.append(make_text_block("=== SCREENSHOT ASIANODDS ==="))
-        content.append(make_image_block(img_b64, mime))
-    if not content or len(content) == 1:
+        content_parts.append(make_text_block("=== SCREENSHOT ASIANODDS ==="))
+        content_parts.append(make_image_block(img_b64, mime))
+
+    if not content_parts or len(content_parts) == 1:
         return "❌ Nessun dato disponibile."
 
-    return await claude_call(TENNIS_QUICK_SYSTEM, content, model="claude-haiku-4-5-20251001", max_tokens=1500)
+    return await claude_call(TENNIS_QUICK_SYSTEM, content_parts, model="claude-haiku-4-5-20251001", max_tokens=1500)
 
 
 async def tennis_extended(state: dict) -> str:

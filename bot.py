@@ -514,13 +514,15 @@ async def tennis_quick(state: dict) -> str:
     html_data = state.get("html_data")
     screenshots = state.get("screenshots", [])
 
+    today = datetime.now().strftime("%d/%m/%Y")
     content = []
+    content.append(make_text_block(f"DATA PARTITA: {today}"))
     if html_data:
         content.append(make_text_block("=== DATI HTML TENNISEXPLORER ===\n" + build_tennis_summary(html_data)))
     for img_b64, mime in screenshots:
         content.append(make_text_block("=== SCREENSHOT ASIANODDS ==="))
         content.append(make_image_block(img_b64, mime))
-    if not content:
+    if not content or len(content) == 1:
         return "❌ Nessun dato disponibile."
 
     return await claude_call(TENNIS_QUICK_SYSTEM, content)
@@ -532,13 +534,15 @@ async def tennis_extended(state: dict) -> str:
     html_data = state.get("html_data")
     screenshots = state.get("screenshots", [])
 
+    today = datetime.now().strftime("%d/%m/%Y")
     content = []
+    content.append(make_text_block(f"DATA PARTITA: {today}"))
     if html_data:
         content.append(make_text_block("=== DATI HTML TENNISEXPLORER ===\n" + build_tennis_summary(html_data)))
     for img_b64, mime in screenshots:
         content.append(make_text_block("=== SCREENSHOT ASIANODDS ==="))
         content.append(make_image_block(img_b64, mime))
-    if not content:
+    if not content or len(content) == 1:
         return "❌ Nessun dato disponibile."
 
     return await claude_call(system, content)
@@ -655,7 +659,9 @@ async def soccer_quick(state: dict) -> str:
     screenshots = state.get("screenshots", [])
     if not screenshots:
         return "❌ Nessuna screenshot TOS."
+    today = datetime.now().strftime("%d/%m/%Y")
     content = []
+    content.append(make_text_block(f"DATA PARTITA: {today}"))
     for img_b64, mime in screenshots:
         content.append(make_image_block(img_b64, mime))
     content.append(make_text_block("Produci la quick analysis 1X2 e U/O 2.5 dal TOS."))
@@ -668,7 +674,9 @@ async def soccer_extended(state: dict) -> str:
     screenshots = state.get("screenshots", [])
     if not screenshots:
         return "❌ Nessuna screenshot TOS."
+    today = datetime.now().strftime("%d/%m/%Y")
     content = []
+    content.append(make_text_block(f"DATA PARTITA: {today}"))
     for img_b64, mime in screenshots:
         content.append(make_image_block(img_b64, mime))
     content.append(make_text_block("Applica il Soccer Model Protocol completo con tutti i layer. Analizza 1X2 e U/O 2.5."))

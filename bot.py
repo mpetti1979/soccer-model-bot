@@ -680,6 +680,131 @@ def format_tennis_ratings(data: dict, ratings: dict) -> str:
 
 
 # ─────────────────────────────────────────────
+# OLS ENGINE
+# ─────────────────────────────────────────────
+
+def no_vig(q1: float, q2: float) -> tuple:
+    p1, p2 = 1/q1, 1/q2
+    tot = p1 + p2
+    return round(1/(p1/tot), 4), round(1/(p2/tot), 4)
+
+def ols_simple(xs: list, ys: list) -> tuple:
+    n = len(xs)
+    if n < 2: return 0, 0, 0
+    mx = sum(xs)/n
+    my = sum(ys)/n
+    ssxy = sum((x-mx)*(y-my) for x,y in zip(xs,ys))
+    ssxx = sum((x-mx)**2 for x in xs)
+    if ssxx == 0: return my, 0, 0
+    b = ssxy/ssxx
+    a = my - b*mx
+    y_pred = [a+b*x for x in xs]
+    ss_res = sum((y-yp)**2 for y,yp in zip(ys,y_pred))
+    ss_tot = sum((y-my)**2 for y in ys)
+    r2 = 1 - ss_res/ss_tot if ss_tot > 0 else 0
+    return round(a,6), round(b,6), round(r2,4)
+
+def parse_ols_input(text: str) -> dict:
+    """
+    Formato:
+      ols 106 276
+      153 237 550
+      161 220 400
+      ...
+    Prima riga: ols rank_sogg_UTR rank_avv_UTR
+    Righe storiche: quota_sogg*100 quota_avv*100 rank_avv_storico
+    Quote divise per 100. Righe: 5-8.
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return {"error": "Input vuoto"}
+
+    # Prima riga — estrai rank sogg e avv oggi
+    first = lines[0]
+    nums_first = re.findall(r"\d+\.?\d*", first)
+    if len(nums_first) < 2:
+        return {"error": "Prima riga: ols [rank_sogg] [rank_avv] — es: ols 106 276"}
+
+    rank_subj = float(nums_first[-2])
+    rank_opp = float(nums_first[-1])
+
+    # Righe storiche — supporta sia righe separate che trattini
+    raw_lines = []
+    for line in lines[1:]:
+        # Splitta per trattino se presente
+        parts = line.split("-")
+        for part in parts:
+            part = part.strip()
+            if part:
+                raw_lines.append(part)
+
+    rows = []
+    for line in raw_lines:
+        nums = re.findall(r"\d+\.?\d*", line)
+        if len(nums) < 3:
+            continue
+        q_s, q_o, rank_a = float(nums[0]), float(nums[1]), float(nums[2])
+        if q_s > 10: q_s /= 100
+        if q_o > 10: q_o /= 100
+        rows.append((q_s, q_o, rank_a))
+
+    if len(rows) < 5:
+        return {"error": f"Servono 5-8 righe storiche, trovate {len(rows)}"}
+    if len(rows) > 8:
+        rows = rows[:8]
+
+    # OLS
+    xs, ys = [], []
+    for q_s, q_o, rank_a in rows:
+        fair_s, _ = no_vig(q_s, q_o)
+        rank_cap = min(rank_a, 1500)
+        xs.append(math.log(rank_cap))
+        ys.append(math.log(fair_s))
+
+    a, b, r2 = ols_simple(xs, ys)
+
+    rank_opp_cap = min(rank_opp, 1500)
+    log_forecast = a + b * math.log(rank_opp_cap)
+    forecast = round(math.exp(log_forecast), 3)
+
+    return {
+        "rank_subj": rank_subj,
+        "rank_opp": rank_opp,
+        "rows": rows,
+        "a": a, "b": b, "r2": r2,
+        "forecast": forecast,
+        "delta_pct": None,
+        "classification": None,
+    }
+
+def finalize_ols(ols_data: dict, pinnacle_q: float) -> dict:
+    if not pinnacle_q:
+        return ols_data
+    delta_pct = round((ols_data["forecast"] - pinnacle_q) / pinnacle_q * 100, 2)
+    abs_d = abs(delta_pct)
+    if abs_d < 5: classification = "Sub-threshold"
+    elif abs_d < 12: classification = "Debole"
+    elif abs_d < 22: classification = "Moderato"
+    else: classification = "Forte"
+
+    # Segnale OLS
+    if delta_pct > 0:
+        ols_signal = "PRO soggetto (forecast > mercato)"
+        ols_rating = 5 if abs_d >= 22 else 4 if abs_d >= 12 else 3 if abs_d >= 5 else 1
+    else:
+        ols_signal = "PRO avversario (forecast < mercato)"
+        ols_rating = 5 if abs_d >= 22 else 4 if abs_d >= 12 else 3 if abs_d >= 5 else 1
+
+    ols_data["delta_pct"] = delta_pct
+    ols_data["pinnacle_q"] = pinnacle_q
+    ols_data["classification"] = classification
+    ols_data["signal"] = ols_signal
+    ols_data["rating"] = ols_rating if ols_data["r2"] >= 0.60 else max(1, ols_rating - 2)
+    ols_data["active"] = ols_data["r2"] >= 0.60 and abs_d >= 5
+    return ols_data
+
+
+# ─────────────────────────────────────────────
 # CLAUDE API CALLS
 # ─────────────────────────────────────────────
 
@@ -834,12 +959,34 @@ async def tennis_quick(state: dict) -> str:
     # Calcola rating deterministici se abbiamo HTML
     if html_data:
         ratings = compute_tennis_ratings(html_data)
-        state["last_ratings"] = ratings  # salva per uso futuro
+        # Aggiungi OLS se disponibile
+        ols_data = state.get("ols_data")
+        if ols_data:
+            # Finalizza OLS se non ancora fatto
+            if ols_data.get("delta_pct") is None:
+                p = html_data["pinnacle"]
+                hq = p.get("home_curr")
+                aq = p.get("away_curr")
+                pinn_fav = min(hq, aq) if hq and aq else hq or aq
+                ols_data = finalize_ols(ols_data, pinn_fav)
+                state["ols_data"] = ols_data
+            ratings["ols"] = ols_data
+        state["last_ratings"] = ratings
+        ols_text = ""
+        if ols_data and ols_data.get("delta_pct") is not None:
+            ols_text = (
+                f"\n\n=== OLS ===\n"
+                f"Rank sogg: {ols_data['rank_subj']} | Rank avv: {ols_data['rank_opp']}\n"
+                f"Forecast: {ols_data['forecast']:.3f} | Pinnacle FAV: {ols_data.get('pinnacle_q','N/A')}\n"
+                f"Δ%: {ols_data['delta_pct']:+.1f}% | R²: {ols_data['r2']:.3f} | {ols_data['classification']}\n"
+                f"Segnale OLS: {ols_data['signal']} | Rating: {ols_data['rating']}/5 | {'✅ ATTIVO' if ols_data.get('active') else '⚠️ non attivo'}\n"
+            )
         content_parts.append(make_text_block(
             "=== DATI HTML TENNISEXPLORER ===\n" +
             build_tennis_summary(html_data) +
             "\n\n" +
-            format_tennis_ratings(html_data, ratings)
+            format_tennis_ratings(html_data, ratings) +
+            ols_text
         ))
 
     for img_b64, mime in screenshots:
@@ -1280,16 +1427,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Input OLS: prima riga inizia con "ols"
+    if text.lower().startswith("ols"):
+        if state.get("mode") != "tennis":
+            await update.message.reply_text("❌ OLS disponibile solo in modalità /tennis.")
+            return
+        ols_result = parse_ols_input(update.message.text.strip())
+        if "error" in ols_result:
+            await update.message.reply_text(f"❌ OLS: {ols_result['error']}")
+            return
+        # Finalizza con quota Pinnacle del favorito se HTML già caricato
+        html_data = state.get("html_data")
+        if html_data:
+            p = html_data["pinnacle"]
+            hq = p.get("home_curr")
+            aq = p.get("away_curr")
+            pinn_fav = min(hq, aq) if hq and aq else hq or aq
+            ols_result = finalize_ols(ols_result, pinn_fav)
+        state["ols_data"] = ols_result
+        delta_str = f"Δ%={ols_result['delta_pct']:+.1f}% ({ols_result['classification']}) | {ols_result['signal']}" if ols_result.get("delta_pct") is not None else "Δ% calcolato al go"
+        active_str = "✅ ATTIVO" if ols_result.get("active") else "⚠️ R²<0.60 o sub-threshold"
+        await update.message.reply_text(
+            f"✅ OLS caricato — {len(ols_result['rows'])} partite storiche\n"
+            f"Rank: sogg={ols_result['rank_subj']} avv={ols_result['rank_opp']}\n"
+            f"Forecast: {ols_result['forecast']:.3f} | R²={ols_result['r2']:.3f}\n"
+            f"{delta_str}\n"
+            f"Layer OLS: {active_str}\n\n"
+            "Scrivi go per analisi completa."
+        )
+        return
+
     await update.message.reply_text(
         "Comandi disponibili:\n"
         "• /tennis — modalità tennis\n"
         "• /calcio — modalità calcio\n"
-        "• *go* — avvia analisi\n"
+        "• go — avvia analisi\n"
         "• /analisi — analisi estesa\n"
         "• /recap — recap Telegram (tennis)\n"
         "• /protocollo lba / soccer\n"
-        "• /reset — azzera",
-        parse_mode="Markdown"
+        "• /reset — azzera"
     )
 
 

@@ -386,7 +386,7 @@ async def claude_call(system: str, user_content) -> str:
         msgs = [{"role": "user", "content": user_content}]
         return client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
+            max_tokens=8000,
             system=system,
             messages=msgs
         )
@@ -416,20 +416,33 @@ TENNIS_QUICK_SYSTEM = """Sei un analista di scommesse tennis. Produci una rispos
 
 Dati disponibili: HTML TennisExplorer (strutturati) e/o screenshot AsianOdds (visiva).
 
+FORMATTAZIONE: usa solo tag HTML Telegram. <b>grassetto</b> per valori chiave. Niente asterischi, niente ##, niente tabelle.
+
 Formato risposta quick — SOLO questo blocco:
 
-🎾 [Home] vs [Away] | [Torneo/N/D]
+🎾 <b>[Home] vs [Away]</b> | [Torneo/N/D]
 📅 [Data/N/D]
 
-⚡ QUICK VERDICT
-FAV: [giocatore più basso Pinnacle] @ [quota]
-Flusso sharp: [FORTE/MEDIO/DEBOLE/ASSENTE]
+⚡ <b>QUICK VERDICT</b>
+FAV: <b>[giocatore più basso Pinnacle] @ [quota]</b>
+Flusso sharp: <b>[FORTE/MEDIO/DEBOLE/ASSENTE]</b>
 Outlier Pinnacle: [SÌ lato X / NO]
 Drift Pinna: Home=[valore] Away=[valore]
 Pattern: Home=[tipo] Away=[tipo]
 
-🎯 [giocatore] | [✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET]
-Motivazione: [1 riga max]"""
+<b>SEGNALI</b>
+- Outlier/Flusso sharp: <b>[X/5]</b>
+- Drift Pinnacle: <b>[X/5]</b>
+- Pattern: <b>[X/5]</b>
+- Gap Pinna/retail: <b>[X/5]</b>
+─────────────────
+Totale: <b>[X/20]</b>
+
+🎯 <b>[giocatore] | [✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET]</b>
+Motivazione: [1 riga max]
+
+Criteri rating X/5: 5=segnale fortissimo e univoco, 4=forte, 3=moderato, 2=debole, 1=quasi assente, 0=assente o contraddittorio.
+Soglie totale (base 20): 17-20=⚡MOLTO FORTE, 13-16=✅FORTE, 8-12=⚠️MEDIO, 0-7=❌DEBOLE"""
 
 TENNIS_EXTENDED_SYSTEM = """Sei un analista senior di scommesse tennis. Applica INTEGRALMENTE il protocollo LBA Pinnacle Workflow fornito.
 
@@ -437,31 +450,52 @@ PROTOCOLLO:
 {protocol}
 
 Analizza tutti i dati disponibili seguendo ogni layer del protocollo. Sii preciso e metodico.
+Sii SINTETICO per sezione: max 4-5 righe per layer. Non ricopiare i dati grezzi, interpreta direttamente.
 
 FORMATTAZIONE OUTPUT — REGOLE ASSOLUTE:
-- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo, <code>testo</code> per codice
+- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo
 - NON usare mai: asterischi (**), cancelletti (##), underscore (__), pipe per tabelle (|---|)
-- Per i titoli di sezione scrivi: <b>SEZIONE 1 — NOME</b>
-- Per le liste usa trattino semplice: - elemento
-- Per i dati affiancati scrivi su righe separate senza tabelle
-- Niente Markdown, zero asterischi, zero simboli di formattazione"""
+- Titoli sezione: <b>LAYER 1 — NOME</b>
+- Liste: trattino semplice - elemento
+- Dati su righe separate, senza tabelle
+
+RATING OBBLIGATORIO — alla fine di ogni layer scrivi:
+Rating: <b>[X/5]</b> — [motivazione breve]
+
+RIEPILOGO FINALE OBBLIGATORIO:
+<b>RIEPILOGO SEGNALI</b>
+- Outlier/Flusso sharp: <b>[X/5]</b>
+- Drift Pinnacle: <b>[X/5]</b>
+- Pattern: <b>[X/5]</b>
+- Gap Pinna/retail: <b>[X/5]</b>
+- Betfair exchange: <b>[X/5]</b> (solo se screenshot fornita, altrimenti ometti)
+- OLS: <b>[X/5]</b> (solo se dati OLS forniti, altrimenti ometti)
+─────────────────
+Totale base: <b>[X/20]</b> [oppure X/25 o X/30 con opzionali]
+
+🎯 <b>[giocatore] | [✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET]</b>
+Stake suggerito: <b>[X.XX]u</b> (1.00% bankroll base, modulato sul totale segnali)
+
+Soglie totale (base 20): 17-20=⚡MOLTO FORTE, 13-16=✅FORTE, 8-12=⚠️MEDIO, 0-7=❌DEBOLE"""
 
 TENNIS_RECAP_SYSTEM = """Produci SOLO il recap Telegram nel formato standard LBA. Niente altro.
 
+FORMATTAZIONE: usa SOLO tag HTML Telegram. Niente asterischi, niente ##.
+
 Formato ESATTO:
-🎾 [TORNEO — ROUND | Superficie]
+🎾 <b>[TORNEO — ROUND | Superficie]</b>
 🗓 [Data] | [Orario]
-**[Giocatore1] 🏳 vs [Giocatore2] 🏳**
+<b>[Giocatore1] 🏳 vs [Giocatore2] 🏳</b>
 
-[Testo narrativo analisi — 3-5 righe]
+[Testo narrativo analisi — 3-5 righe, plain text]
 
-⭐ Flusso sharp: [stelle]
-⭐ Conferma exchange: [stelle]
-⭐ Statistiche: [stelle]
-⭐ Freschezza: [stelle]
+⭐ Flusso sharp: <b>[X/5]</b>
+⭐ Drift/Pattern: <b>[X/5]</b>
+⭐ Exchange Betfair: <b>[X/5]</b> (ometti se non disponibile)
+⭐ OLS: <b>[X/5]</b> (ometti se non disponibile)
 
-🎯 **[Giocatore]** | Quota ~[X.XX]
-📦 Stake: [X.XX]u"""
+🎯 <b>[Giocatore]</b> | Quota ~<b>[X.XX]</b>
+📦 Stake: <b>[X.XX]u</b>"""
 
 
 async def tennis_quick(state: dict) -> str:
@@ -514,38 +548,95 @@ SOCCER_QUICK_SYSTEM = """Sei un analista di scommesse calcio. Produci una rispos
 
 Leggi dalla screenshot i dati TOS: Tot Vol, Sel Vol, price, book%, implied%, bookImp diff, impDifToNow, bookDiffToNow, PinnyPrice per tutti i selezionati (1, X, 2 e U/O 2.5).
 
+FORMATTAZIONE: usa solo tag HTML Telegram. <b>grassetto</b> per valori chiave. Niente asterischi, niente ##, niente tabelle.
+
 Formato risposta quick — SOLO questo blocco:
 
-⚽ [Home] vs [Away] | [Torneo/N/D]
+⚽ <b>[Home] vs [Away]</b> | [Torneo/N/D]
 📅 [Data/N/D]
 
-⚡ QUICK 1X2
-PinnyPrice: 1=[quota] X=[quota] 2=[quota]
+⚡ <b>QUICK 1X2</b>
+PinnyPrice: 1=<b>[quota]</b> X=<b>[quota]</b> 2=<b>[quota]</b>
 bookImp diff: 1=[val] X=[val] 2=[val]
 impDifToNow: 1=[val] X=[val] 2=[val]
 Flusso sharp: [descrizione 1 riga]
-🎯 1X2: [1/X/2 o NO BET] | Motivazione: [1 riga]
 
-⚡ QUICK U/O 2.5
-PinnyPrice: U=[quota] O=[quota]
+<b>SEGNALI 1X2</b>
+- L1 Grafico: <b>[X/5]</b>
+- L3 bookImpDiff: <b>[X/5]</b>
+- L4 bookDiffToNow: <b>[X/5]</b>
+- L5 impDifToNow: <b>[X/5]</b>
+- L6 PinnyPrice gap: <b>[X/5]</b>
+─────────────────
+Totale: <b>[X/25]</b>
+🎯 1X2: <b>[1/X/2 o NO BET]</b> | [Motivazione 1 riga]
+
+⚡ <b>QUICK U/O 2.5</b>
+PinnyPrice: U=<b>[quota]</b> O=<b>[quota]</b>
 bookImp diff: U=[val] O=[val]
 impDifToNow: U=[val] O=[val]
-🎯 U/O: [Under/Over o NO BET] | Motivazione: [1 riga]"""
+
+<b>SEGNALI U/O</b>
+- L1 Grafico: <b>[X/5]</b>
+- L3 bookImpDiff: <b>[X/5]</b>
+- L4 bookDiffToNow: <b>[X/5]</b>
+- L5 impDifToNow: <b>[X/5]</b>
+- L6 PinnyPrice gap: <b>[X/5]</b>
+─────────────────
+Totale: <b>[X/25]</b>
+🎯 U/O: <b>[Under/Over o NO BET]</b> | [Motivazione 1 riga]
+
+Criteri rating X/5: 5=segnale fortissimo univoco, 4=forte, 3=moderato, 2=debole, 1=quasi assente, 0=assente/contraddittorio.
+Soglie totale /25: 21-25=⚡MOLTO FORTE, 16-20=✅FORTE, 10-15=⚠️MEDIO, 0-9=❌DEBOLE"""
 
 SOCCER_EXTENDED_SYSTEM = """Sei un analista senior di scommesse calcio. Applica INTEGRALMENTE il Soccer Model Protocol fornito con tutti i 7 layer.
 
 PROTOCOLLO:
 {protocol}
 
-Analizza la screenshot TOS seguendo ogni layer per 1X2 e U/O 2.5. Sii preciso e metodico. Assegna grading finale (AAA/AA/A/B/C/NOP) per ogni selezione.
+Analizza la screenshot TOS seguendo ogni layer per 1X2 e U/O 2.5. Sii preciso e metodico.
+Sii SINTETICO: max 4-5 righe per layer. Non ricopiare i dati grezzi, interpreta direttamente.
+Assegna grading finale (AAA/AA/A/B/C/NOP) per ogni selezione.
 
 FORMATTAZIONE OUTPUT — REGOLE ASSOLUTE:
-- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo, <code>testo</code> per codice
+- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo
 - NON usare mai: asterischi (**), cancelletti (##), underscore (__), pipe per tabelle (|---|)
-- Per i titoli di sezione scrivi: <b>SEZIONE 1 — NOME</b>
-- Per le liste usa trattino semplice: - elemento
-- Per i dati affiancati scrivi su righe separate senza tabelle
-- Niente Markdown, zero asterischi, zero simboli di formattazione"""
+- Titoli sezione: <b>LAYER 1 — NOME</b>
+- Liste: trattino semplice - elemento
+- Dati su righe separate, senza tabelle
+
+RATING OBBLIGATORIO — alla fine di ogni layer scrivi:
+Rating: <b>[X/5]</b> — [motivazione breve]
+
+RIEPILOGO FINALE OBBLIGATORIO (per 1X2 e U/O separati):
+
+<b>RIEPILOGO 1X2</b>
+- L1 Grafico: <b>[X/5]</b>
+- L2 Volume: <b>[X/5]</b>
+- L3 bookImpDiff: <b>[X/5]</b>
+- L4 bookDiffToNow: <b>[X/5]</b>
+- L5 impDifToNow: <b>[X/5]</b>
+- L6 PinnyPrice gap: <b>[X/5]</b>
+- L7 Chart class: <b>[X/5]</b>
+─────────────────
+Totale: <b>[X/35]</b>
+Grading: <b>[AAA/AA/A/B/C/NOP]</b>
+🎯 Selezione: <b>[1/X/2 o NOP]</b>
+
+<b>RIEPILOGO U/O 2.5</b>
+- L1 Grafico: <b>[X/5]</b>
+- L2 Volume: <b>[X/5]</b>
+- L3 bookImpDiff: <b>[X/5]</b>
+- L4 bookDiffToNow: <b>[X/5]</b>
+- L5 impDifToNow: <b>[X/5]</b>
+- L6 PinnyPrice gap: <b>[X/5]</b>
+- L7 Chart class: <b>[X/5]</b>
+─────────────────
+Totale: <b>[X/35]</b>
+Grading: <b>[AAA/AA/A/B/C/NOP]</b>
+🎯 Selezione: <b>[Under/Over o NOP]</b>
+
+Soglie grading: 30-35=AAA, 24-29=AA, 18-23=A, 12-17=B, 6-11=C, 0-5=NOP"""
 
 
 async def soccer_quick(state: dict) -> str:

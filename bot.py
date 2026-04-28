@@ -1,4 +1,3 @@
-
 """
 Multi-Sport Betting Analysis Bot — v4.0
 Sports: Tennis (LBA Pinnacle Workflow v2.6) + Calcio (Soccer Model Protocol v1.4)
@@ -69,14 +68,25 @@ def get_drive_service():
 
 
 def fetch_protocol(file_id: str) -> str:
-    """Scarica un file .md da Drive e lo restituisce come testo."""
+    """Scarica un file da Drive (Google Doc o file caricato) e lo restituisce come testo."""
     if file_id in _protocol_cache:
         return _protocol_cache[file_id]
     service = get_drive_service()
     if not service:
         return "[Protocollo non disponibile — credenziali Drive mancanti]"
     try:
-        request = service.files().get_media(fileId=file_id)
+        # Prima controlla il mimeType del file
+        meta = service.files().get(fileId=file_id, fields="mimeType,name").execute()
+        mime = meta.get("mimeType", "")
+        logger.info(f"Protocollo {file_id} — tipo: {mime}")
+
+        if mime == "application/vnd.google-apps.document":
+            # Google Doc: esporta come testo plain
+            request = service.files().export_media(fileId=file_id, mimeType="text/plain")
+        else:
+            # File caricato (.md, .txt, ecc.): download diretto
+            request = service.files().get_media(fileId=file_id)
+
         buf = io.BytesIO()
         downloader = MediaIoBaseDownload(buf, request)
         done = False
@@ -84,7 +94,7 @@ def fetch_protocol(file_id: str) -> str:
             _, done = downloader.next_chunk()
         text = buf.getvalue().decode("utf-8", errors="replace")
         _protocol_cache[file_id] = text
-        logger.info(f"Protocollo {file_id} caricato da Drive ({len(text)} chars)")
+        logger.info(f"Protocollo {file_id} caricato ({len(text)} chars)")
         return text
     except Exception as e:
         logger.error(f"Drive fetch error {file_id}: {e}")

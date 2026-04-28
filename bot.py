@@ -416,6 +416,12 @@ TENNIS_QUICK_SYSTEM = """Sei un analista di scommesse tennis. Produci una rispos
 
 Dati disponibili: HTML TennisExplorer (strutturati) e/o screenshot AsianOdds (visiva).
 
+REGOLE CRITICHE LBA — MAI SBAGLIARE:
+1. OUTLIER: Pinnacle MAX su lato X significa che gli sharp hanno già giocato MASSICCIAMENTE sul lato OPPOSTO. Outlier Home = PRO Away. Outlier Away = PRO Home. MAI interpretare outlier come valore sul lato outlier stesso.
+2. DRIFT Pinnacle: quota sale su X = sharp giocano su Y (opposto). Quota scende su X = sharp giocano su X.
+3. FAV: sempre il giocatore con quota Pinnacle più BASSA.
+4. VERDETTO FINALE: deve essere coerente con i segnali. Se outlier è su Home → segnale PRO Away → verdetto su Away.
+
 FORMATTAZIONE: usa solo tag HTML Telegram. <b>grassetto</b> per valori chiave. Niente asterischi, niente ##, niente tabelle.
 
 Formato risposta quick — SOLO questo blocco:
@@ -448,6 +454,12 @@ TENNIS_EXTENDED_SYSTEM = """Sei un analista senior di scommesse tennis. Applica 
 
 PROTOCOLLO:
 {protocol}
+
+REGOLE CRITICHE LBA — MAI SBAGLIARE:
+1. OUTLIER: Pinnacle MAX su lato X = sharp hanno già giocato sul lato OPPOSTO. Outlier Home = PRO Away. Outlier Away = PRO Home. MAI leggere outlier come valore sul lato outlier.
+2. DRIFT: Pinnacle sale su X = sharp giocano su Y. Pinnacle scende su X = sharp giocano su X.
+3. FAV: sempre quota Pinnacle più bassa.
+4. VERDETTO FINALE coerente con i segnali convergenti.
 
 Analizza tutti i dati disponibili seguendo ogni layer del protocollo. Sii preciso e metodico.
 Sii SINTETICO per sezione: max 4-5 righe per layer. Non ricopiare i dati grezzi, interpreta direttamente.

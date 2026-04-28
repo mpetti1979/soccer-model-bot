@@ -542,27 +542,32 @@ async def tennis_extended(state: dict) -> str:
     protocol = get_lba_protocol()
     system = TENNIS_EXTENDED_SYSTEM.format(protocol=protocol)
     html_data = state.get("html_data")
-    screenshots = state.get("screenshots", [])
-
     today = datetime.now().strftime("%d/%m/%Y")
-    content = []
-    content.append(make_text_block(f"DATA PARTITA: {today}"))
+
+    # Estesa usa solo testo — immagine già processata nella quick
+    parts = [f"DATA PARTITA: {today}"]
     if html_data:
-        content.append(make_text_block("=== DATI HTML TENNISEXPLORER ===\n" + build_tennis_summary(html_data)))
-    for img_b64, mime in screenshots:
-        content.append(make_text_block("=== SCREENSHOT ASIANODDS ==="))
-        content.append(make_image_block(img_b64, mime))
-    if not content or len(content) == 1:
+        parts.append("=== DATI HTML TENNISEXPLORER ===\n" + build_tennis_summary(html_data))
+    quick = state.get("last_quick", "")
+    if quick:
+        parts.append(f"=== QUICK ANALYSIS GIÀ ESEGUITA ===\n{quick}")
+    if not html_data and not quick:
         return "❌ Nessun dato disponibile."
 
+    content = [make_text_block("\n\n".join(parts))]
     return await claude_call(system, content, model="claude-haiku-4-5-20251001", max_tokens=2000)
 
 
 async def tennis_recap(state: dict) -> str:
-    last_analysis = state.get("last_extended", "")
-    if not last_analysis:
-        return "❌ Fai prima /analisi."
-    content = [make_text_block(f"Analisi precedente:\n{last_analysis}\n\nProduci il recap Telegram.")]
+    # Usa estesa se disponibile, altrimenti parte dalla quick
+    base = state.get("last_extended", "") or state.get("last_quick", "")
+    if not base:
+        return "❌ Esegui prima la quick analysis (go)."
+    html_data = state.get("html_data")
+    extra = ""
+    if html_data:
+        extra = "\n\n=== DATI AGGIUNTIVI ===\n" + build_tennis_summary(html_data)
+    content = [make_text_block(f"Analisi disponibile:\n{base}{extra}\n\nProduci il recap Telegram.")]
     return await claude_call(TENNIS_RECAP_SYSTEM, content, model="claude-haiku-4-5-20251001", max_tokens=800)
 
 
@@ -677,15 +682,18 @@ async def soccer_quick(state: dict) -> str:
 async def soccer_extended(state: dict) -> str:
     protocol = get_soccer_protocol()
     system = SOCCER_EXTENDED_SYSTEM.format(protocol=protocol)
-    screenshots = state.get("screenshots", [])
-    if not screenshots:
-        return "❌ Nessuna screenshot TOS."
     today = datetime.now().strftime("%d/%m/%Y")
-    content = []
-    content.append(make_text_block(f"DATA PARTITA: {today}"))
-    for img_b64, mime in screenshots:
-        content.append(make_image_block(img_b64, mime))
-    content.append(make_text_block("Applica il Soccer Model Protocol completo con tutti i layer. Analizza 1X2 e U/O 2.5."))
+    quick = state.get("last_quick", "")
+    if not quick:
+        return "❌ Esegui prima la quick analysis (go)."
+
+    # Estesa usa solo testo — immagine già processata nella quick
+    parts = [
+        f"DATA PARTITA: {today}",
+        f"=== QUICK ANALYSIS GIÀ ESEGUITA ===\n{quick}",
+        "Approfondisci layer per layer per 1X2 e U/O 2.5."
+    ]
+    content = [make_text_block("\n\n".join(parts))]
     return await claude_call(system, content, model="claude-haiku-4-5-20251001", max_tokens=2000)
 
 
@@ -799,6 +807,9 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_state(uid)
     if state.get("mode") != "tennis":
         await update.message.reply_text("❌ Il recap è disponibile solo in modalità tennis.")
+        return
+    if not state.get("last_quick") and not state.get("last_extended"):
+        await update.message.reply_text("❌ Esegui prima la quick analysis (go).")
         return
     await update.message.reply_text("⏳ Generazione recap...")
     result = await tennis_recap(state)

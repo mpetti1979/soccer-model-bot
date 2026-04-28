@@ -436,7 +436,15 @@ TENNIS_EXTENDED_SYSTEM = """Sei un analista senior di scommesse tennis. Applica 
 PROTOCOLLO:
 {protocol}
 
-Analizza tutti i dati disponibili seguendo ogni layer del protocollo. Sii preciso e metodico."""
+Analizza tutti i dati disponibili seguendo ogni layer del protocollo. Sii preciso e metodico.
+
+FORMATTAZIONE OUTPUT — REGOLE ASSOLUTE:
+- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo, <code>testo</code> per codice
+- NON usare mai: asterischi (**), cancelletti (##), underscore (__), pipe per tabelle (|---|)
+- Per i titoli di sezione scrivi: <b>SEZIONE 1 — NOME</b>
+- Per le liste usa trattino semplice: - elemento
+- Per i dati affiancati scrivi su righe separate senza tabelle
+- Niente Markdown, zero asterischi, zero simboli di formattazione"""
 
 TENNIS_RECAP_SYSTEM = """Produci SOLO il recap Telegram nel formato standard LBA. Niente altro.
 
@@ -529,7 +537,15 @@ SOCCER_EXTENDED_SYSTEM = """Sei un analista senior di scommesse calcio. Applica 
 PROTOCOLLO:
 {protocol}
 
-Analizza la screenshot TOS seguendo ogni layer per 1X2 e U/O 2.5. Sii preciso e metodico. Assegna grading finale (AAA/AA/A/B/C/NOP) per ogni selezione."""
+Analizza la screenshot TOS seguendo ogni layer per 1X2 e U/O 2.5. Sii preciso e metodico. Assegna grading finale (AAA/AA/A/B/C/NOP) per ogni selezione.
+
+FORMATTAZIONE OUTPUT — REGOLE ASSOLUTE:
+- Usa SOLO tag HTML Telegram: <b>testo</b> per grassetto, <i>testo</i> per corsivo, <code>testo</code> per codice
+- NON usare mai: asterischi (**), cancelletti (##), underscore (__), pipe per tabelle (|---|)
+- Per i titoli di sezione scrivi: <b>SEZIONE 1 — NOME</b>
+- Per le liste usa trattino semplice: - elemento
+- Per i dati affiancati scrivi su righe separate senza tabelle
+- Niente Markdown, zero asterischi, zero simboli di formattazione"""
 
 
 async def soccer_quick(state: dict) -> str:
@@ -656,9 +672,9 @@ async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Telegram ha limite 4096 chars — splitta se necessario
     for chunk in split_message(result):
         try:
-            await update.message.reply_text(chunk)
+            await update.message.reply_text(chunk, parse_mode="HTML")
         except Exception:
-            await update.message.reply_text(chunk)
+            await update.message.reply_text(chunk, parse_mode="HTML")
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -670,9 +686,9 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Generazione recap...")
     result = await tennis_recap(state)
     try:
-        await update.message.reply_text(result)
+        await update.message.reply_text(result, parse_mode="HTML")
     except Exception:
-        await update.message.reply_text(result)
+        await update.message.reply_text(result, parse_mode="HTML")
 
 
 async def cmd_protocollo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -698,9 +714,9 @@ async def cmd_protocollo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full = header + text
     for chunk in split_message(full):
         try:
-            await update.message.reply_text(chunk)
+            await update.message.reply_text(chunk, parse_mode="HTML")
         except Exception:
-            await update.message.reply_text(chunk)
+            await update.message.reply_text(chunk, parse_mode="HTML")
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -810,9 +826,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["last_quick"] = result
 
         try:
-            await update.message.reply_text(result)
+            await update.message.reply_text(result, parse_mode="HTML")
         except Exception:
-            await update.message.reply_text(result)
+            await update.message.reply_text(result, parse_mode="HTML")
 
         await update.message.reply_text(
             "Comandi disponibili:\n"

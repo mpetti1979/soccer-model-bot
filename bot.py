@@ -165,6 +165,34 @@ def parse_tennisexplorer(html: str) -> dict:
     if detail_div:
         match_info = detail_div.get_text(separator=" ", strip=True)[:200]
 
+    # Estrai info match: data, ora, torneo, round, superficie
+    match_date = ""
+    match_time = ""
+    match_tournament = ""
+    match_round = ""
+    match_surface = ""
+    for tag in soup.find_all(["div", "span", "p", "td"]):
+        txt = tag.get_text(strip=True)
+        m = re.match(r"(Today|\d{2}\.\d{2}\.\d{4}),\s*(\d{2}:\d{2}),\s*(.+)", txt, re.IGNORECASE)
+        if m:
+            match_date = m.group(1)
+            match_time = m.group(2)
+            rest = m.group(3)
+            parts_info = [p.strip() for p in rest.split(",")]
+            if parts_info:
+                match_tournament = parts_info[0]
+            if len(parts_info) > 1:
+                match_round = parts_info[1]
+            if len(parts_info) > 2:
+                match_surface = parts_info[2]
+            break
+    if not match_surface:
+        for tag in soup.find_all(["div", "span", "td"]):
+            txt = tag.get_text(strip=True).lower()
+            if txt in ("clay", "hard", "grass", "carpet"):
+                match_surface = txt.capitalize()
+                break
+
     odds_div = soup.find("div", id="oddsMenu-1-data")
     if not odds_div:
         return {"error": "Sezione odds non trovata nell'HTML"}
@@ -319,10 +347,29 @@ def parse_tennisexplorer(html: str) -> dict:
     pattern_home = detect_pattern(pinnacle.get("home_history", []))
     pattern_away = detect_pattern(pinnacle.get("away_history", []))
 
+    # FAV = quota Pinnacle più bassa
+    if pinn_home_curr and pinn_away_curr:
+        if pinn_home_curr <= pinn_away_curr:
+            fav_name, fav_side, fav_q = home_name, "Home", pinn_home_curr
+            und_name, und_side, und_q = away_name, "Away", pinn_away_curr
+        else:
+            fav_name, fav_side, fav_q = away_name, "Away", pinn_away_curr
+            und_name, und_side, und_q = home_name, "Home", pinn_home_curr
+    else:
+        fav_name, fav_side, fav_q = home_name, "Home", pinn_home_curr
+        und_name, und_side, und_q = away_name, "Away", pinn_away_curr
+
     return {
         "home_name": home_name,
         "away_name": away_name,
         "match_info": match_info,
+        "match_date": match_date,
+        "match_time": match_time,
+        "match_tournament": match_tournament,
+        "match_round": match_round,
+        "match_surface": match_surface,
+        "fav_name": fav_name, "fav_side": fav_side, "fav_q": fav_q,
+        "und_name": und_name, "und_side": und_side, "und_q": und_q,
         "books": books,
         "pinnacle": {
             "home_curr": pinn_home_curr, "away_curr": pinn_away_curr,
@@ -384,9 +431,18 @@ def build_tennis_summary(data: dict) -> str:
     p = data["pinnacle"]
     r = data["retail"]
     g = data["gap_pinn_vs_retail"]
+    torneo = " | ".join(filter(None, [
+        data.get("match_tournament", ""),
+        data.get("match_round", ""),
+        data.get("match_surface", ""),
+    ]))
+    data_ora = " ".join(filter(None, [data.get("match_date",""), data.get("match_time","")]))
     lines = [
         f"MATCH: {data['home_name']} (Home) vs {data['away_name']} (Away)",
-        f"INFO: {data.get('match_info', 'N/A')[:150]}",
+        f"TORNEO: {torneo or 'N/D'}",
+        f"DATA/ORA: {data_ora or 'N/D'}",
+        f"FAV (quota Pinnacle più bassa): {data['fav_name']} ({data['fav_side']}) @ {data['fav_q']}",
+        f"UND: {data['und_name']} ({data['und_side']}) @ {data['und_q']}",
         "",
         "=== QUOTA MAX ATTUALE ===",
         f"Home MAX: {data['max_home']['q']} ({data['max_home']['book']})",
@@ -899,7 +955,7 @@ Formato risposta quick — SOLO questo blocco:
 📅 [Data/N/D]
 
 ⚡ <b>QUICK VERDICT</b>
-FAV: <b>[giocatore più basso Pinnacle] @ [quota]</b>
+FAV: <b>[nome FAV dai dati Python] @ [quota Pinnacle FAV]</b> | UND: <b>[nome UND] @ [quota]</b>
 Flusso sharp: <b>[FORTE/MEDIO/DEBOLE/ASSENTE]</b>
 Outlier Pinnacle: [SÌ lato X / NO]
 Drift Pinna: Home=[valore] Away=[valore]
@@ -1388,12 +1444,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     state["html_data"] = data
-    p = data["pinnacle"]
     snapshot = format_quote_snapshot(data)
+    torneo = " | ".join(filter(None, [
+        data.get("match_tournament",""), data.get("match_round",""), data.get("match_surface","")
+    ]))
+    data_ora = " ".join(filter(None, [data.get("match_date",""), data.get("match_time","")]))
     msg = (
         f"✅ <b>{data['home_name']} vs {data['away_name']}</b>\n"
-        f"MAX: Home {data['max_home']['q']} ({data['max_home']['book']}) | "
-        f"Away {data['max_away']['q']} ({data['max_away']['book']})\n\n"
+        f"🏆 {torneo or 'N/D'} | 📅 {data_ora or 'N/D'}\n"
+        f"⚖️ FAV: <b>{data['fav_name']}</b> ({data['fav_side']}) @ {data['fav_q']} | "
+        f"UND: <b>{data['und_name']}</b> @ {data['und_q']}\n\n"
         f"<code>{snapshot}</code>\n\n"
         "Puoi aggiungere screenshot AsianOdds o dati OLS, oppure scrivi <b>go</b>."
     )

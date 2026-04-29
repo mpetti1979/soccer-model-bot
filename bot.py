@@ -343,6 +343,43 @@ def parse_tennisexplorer(html: str) -> dict:
     }
 
 
+def format_quote_snapshot(data: dict, tol: float = 0.05) -> str:
+    """Riepilogo numerico quote: Pinnacle vs retail, apertura vs ora."""
+    p = data["pinnacle"]
+    r = data["retail"]
+
+    def pos(gap):
+        if gap is None: return "N/D"
+        if gap > tol: return f"SOPRA ({gap:+.3f})"
+        elif gap < -tol: return f"SOTTO ({gap:+.3f})"
+        else: return f"IN LINEA ({gap:+.3f})"
+
+    def delta_str(v):
+        if v is None: return "N/D"
+        return f"{v:+.3f}"
+
+    gap_ape_home = round(p['home_open'] - r['home_open'], 3) if p['home_open'] and r['home_open'] else None
+    gap_ape_away = round(p['away_open'] - r['away_open'], 3) if p['away_open'] and r['away_open'] else None
+    gap_ora_home = round(p['home_curr'] - r['home_curr'], 3) if p['home_curr'] and r['home_curr'] else None
+    gap_ora_away = round(p['away_curr'] - r['away_curr'], 3) if p['away_curr'] and r['away_curr'] else None
+
+    lines = [
+        "📊 QUOTE SNAPSHOT",
+        f"{'':18} APE     ORA     Δ",
+        f"Pinna  {data['home_name'][:8]:10} {str(p['home_open']):7} {str(p['home_curr']):7} {delta_str(p['drift_home'])}",
+        f"Retail {data['home_name'][:8]:10} {str(r['home_open']):7} {str(r['home_curr']):7} {delta_str(r['drift_home'])}",
+        f"Gap    Home:       {str(gap_ape_home):7} {str(gap_ora_home):7}",
+        "",
+        f"Pinna  {data['away_name'][:8]:10} {str(p['away_open']):7} {str(p['away_curr']):7} {delta_str(p['drift_away'])}",
+        f"Retail {data['away_name'][:8]:10} {str(r['away_open']):7} {str(r['away_curr']):7} {delta_str(r['drift_away'])}",
+        f"Gap    Away:       {str(gap_ape_away):7} {str(gap_ora_away):7}",
+        "",
+        f"Pinna vs retail APERTURA: Home {pos(gap_ape_home)} | Away {pos(gap_ape_away)}",
+        f"Pinna vs retail ORA:      Home {pos(gap_ora_home)} | Away {pos(gap_ora_away)}",
+    ]
+    return "\n".join(lines)
+
+
 def build_tennis_summary(data: dict) -> str:
     p = data["pinnacle"]
     r = data["retail"]
@@ -1349,13 +1386,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state["html_data"] = data
     p = data["pinnacle"]
-    await update.message.reply_text(
-        f"✅ HTML caricato: *{data['home_name']} vs {data['away_name']}*\n"
-        f"Pinnacle: Home {p['home_open']}→{p['home_curr']} | Away {p['away_open']}→{p['away_curr']}\n"
-        f"MAX: Home {data['max_home']['q']} | Away {data['max_away']['q']}\n\n"
-        "Puoi aggiungere screenshot AsianOdds oppure scrivi *go*.",
-        parse_mode="Markdown"
+    snapshot = format_quote_snapshot(data)
+    msg = (
+        f"✅ <b>{data['home_name']} vs {data['away_name']}</b>\n"
+        f"MAX: Home {data['max_home']['q']} ({data['max_home']['book']}) | "
+        f"Away {data['max_away']['q']} ({data['max_away']['book']})\n\n"
+        f"<code>{snapshot}</code>\n\n"
+        "Puoi aggiungere screenshot AsianOdds o dati OLS, oppure scrivi <b>go</b>."
     )
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):

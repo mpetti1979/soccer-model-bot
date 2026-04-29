@@ -901,7 +901,7 @@ def finalize_ols(ols_data: dict, pinnacle_q: float) -> dict:
 # CLAUDE API CALLS
 # ─────────────────────────────────────────────
 
-async def claude_call(system: str, user_content, model: str = "claude-haiku-4-5-20251001", max_tokens: int = 2000) -> str:
+async def claude_call(system: str, user_content, model: str = "claude-haiku-4-5-20251001", max_tokens: int = 2000, timeout: float = 120.0) -> str:
     """Chiama Claude con system prompt e contenuto utente (testo o lista multimodale)."""
     def _call():
         msgs = [{"role": "user", "content": user_content}]
@@ -912,7 +912,7 @@ async def claude_call(system: str, user_content, model: str = "claude-haiku-4-5-
             messages=msgs
         )
     try:
-        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=120.0)
+        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout)
         return response.content[0].text
     except asyncio.TimeoutError:
         return "⏱ Timeout analisi (120s). Riprova con /analisi."
@@ -1097,22 +1097,25 @@ async def tennis_quick(state: dict) -> str:
 
 async def tennis_extended(state: dict) -> str:
     protocol = get_lba_protocol()
-    system = TENNIS_EXTENDED_SYSTEM.format(protocol=protocol)
+    # Tronca protocollo per evitare timeout — regole operative stanno nei primi 2000 chars
+    system = TENNIS_EXTENDED_SYSTEM.format(protocol=protocol[:2000])
     html_data = state.get("html_data")
     today = datetime.now().strftime("%d/%m/%Y")
 
-    # Estesa usa solo testo — immagine già processata nella quick
+    # Estesa usa solo quick + ratings — HTML summary già incluso nella quick
     parts = [f"DATA PARTITA: {today}"]
-    if html_data:
-        parts.append("=== DATI HTML TENNISEXPLORER ===\n" + build_tennis_summary(html_data))
     quick = state.get("last_quick", "")
     if quick:
         parts.append(f"=== QUICK ANALYSIS GIÀ ESEGUITA ===\n{quick}")
-    if not html_data and not quick:
-        return "❌ Nessun dato disponibile."
+    # Passa anche i rating deterministici se disponibili
+    ratings = state.get("last_ratings")
+    if ratings and html_data:
+        parts.append(format_tennis_ratings(html_data, ratings))
+    if not quick:
+        return "❌ Esegui prima la quick analysis (go)."
 
     content = [make_text_block("\n\n".join(parts))]
-    return await claude_call(system, content, model="claude-haiku-4-5-20251001", max_tokens=2000)
+    return await claude_call(system, content, model="claude-haiku-4-5-20251001", max_tokens=2000, timeout=180)
 
 
 async def tennis_recap(state: dict) -> str:

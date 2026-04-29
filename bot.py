@@ -887,6 +887,10 @@ REGOLE CRITICHE LBA — MAI SBAGLIARE:
 3. FAV: sempre il giocatore con quota Pinnacle più BASSA.
 4. VERDETTO FINALE: deve essere coerente con i segnali. Se outlier è su Home → segnale PRO Away → verdetto su Away.
 
+RATING — REGOLA ASSOLUTA:
+Se nei dati ricevi il blocco "=== RATING DETERMINISTICI (calcolati da Python — NON modificare) ===" devi usare ESATTAMENTE quei valori numerici X/5 e il totale X/20. NON ricalcolare. NON modificare. Copia i numeri così come sono.
+Il VERDETTO PYTHON indicato nel blocco è vincolante: se dice GIOCA, il tuo output deve essere GIOCA. Se dice NO BET, output NO BET.
+
 FORMATTAZIONE: usa solo tag HTML Telegram. <b>grassetto</b> per valori chiave. Niente asterischi, niente ##, niente tabelle.
 
 Formato risposta quick — SOLO questo blocco:
@@ -912,7 +916,6 @@ Totale: <b>[X/20]</b>
 🎯 <b>[giocatore] | [✅ GIOCA / ⚠️ ATTENZIONE / ❌ NO BET]</b>
 Motivazione: [1 riga max]
 
-Criteri rating X/5: 5=segnale fortissimo e univoco, 4=forte, 3=moderato, 2=debole, 1=quasi assente, 0=assente o contraddittorio.
 Soglie totale (base 20): 17-20=⚡MOLTO FORTE, 13-16=✅FORTE, 8-12=⚠️MEDIO, 0-7=❌DEBOLE"""
 
 TENNIS_EXTENDED_SYSTEM = """Sei un analista di scommesse tennis. La quick analysis è già stata fatta. Approfondisci SOLO i punti critici seguendo il protocollo LBA.

@@ -1347,10 +1347,18 @@ async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("⏳ Analisi estesa in corso...")
 
-    if mode == "tennis":
-        result = await tennis_extended(state)
-    else:
-        result = await soccer_extended(state)
+    try:
+        if mode == "tennis":
+            result = await tennis_extended(state)
+        else:
+            result = await soccer_extended(state)
+    except asyncio.TimeoutError:
+        await update.message.reply_text("⏱ Timeout analisi. Riprova con /analisi.")
+        return
+    except Exception as e:
+        logger.error(f"tennis_extended error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Errore analisi estesa: {str(e)[:300]}")
+        return
 
     state["last_extended"] = result
 
@@ -1359,7 +1367,7 @@ async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text(chunk, parse_mode="HTML")
         except Exception:
-            await update.message.reply_text(chunk, parse_mode="HTML")
+            await update.message.reply_text(chunk)
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):

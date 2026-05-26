@@ -1,7 +1,8 @@
 """
-Multi-Sport Betting Analysis Bot — v4.0
+Multi-Sport Betting Analysis Bot — v5.0
 Sports: Tennis (LBA Pinnacle Workflow v2.6) + Calcio (Soccer Model Protocol v1.4)
 Protocolli letti da Google Drive
+Agenti: TennisExplorer scraper, Arbworld, OLS, Betfair
 """
 
 import os
@@ -19,12 +20,15 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters
 )
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import io
+
+from scraper_tennis import scrape_programme, scrape_match_html, format_programme_telegram
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +40,7 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # per invio automatico mattutino
 
 DRIVE_FILE_SOCCER = "13cLHKqF_CJlU9M3YpL2p6JOHfPVn_ONx"
 DRIVE_FILE_LBA    = "1CCtNowTNMYqSO-N6Km13jC9iJByWwaqyx4nThKZd680"
@@ -68,23 +73,19 @@ def get_drive_service():
 
 
 def fetch_protocol(file_id: str) -> str:
-    """Scarica un file da Drive (Google Doc o file caricato) e lo restituisce come testo."""
     if file_id in _protocol_cache:
         return _protocol_cache[file_id]
     service = get_drive_service()
     if not service:
         return "[Protocollo non disponibile — credenziali Drive mancanti]"
     try:
-        # Prima controlla il mimeType del file
         meta = service.files().get(fileId=file_id, fields="mimeType,name").execute()
         mime = meta.get("mimeType", "")
         logger.info(f"Protocollo {file_id} — tipo: {mime}")
 
         if mime == "application/vnd.google-apps.document":
-            # Google Doc: esporta come testo plain
             request = service.files().export_media(fileId=file_id, mimeType="text/plain")
         else:
-            # File caricato (.md, .txt, ecc.): download diretto
             request = service.files().get_media(fileId=file_id)
 
         buf = io.BytesIO()
@@ -165,7 +166,6 @@ def parse_tennisexplorer(html: str) -> dict:
     if detail_div:
         match_info = detail_div.get_text(separator=" ", strip=True)[:200]
 
-    # Estrai info match: data, ora, torneo, round, superficie
     match_date = ""
     match_time = ""
     match_tournament = ""
@@ -347,7 +347,6 @@ def parse_tennisexplorer(html: str) -> dict:
     pattern_home = detect_pattern(pinnacle.get("home_history", []))
     pattern_away = detect_pattern(pinnacle.get("away_history", []))
 
-    # FAV = quota Pinnacle più bassa
     if pinn_home_curr and pinn_away_curr:
         if pinn_home_curr <= pinn_away_curr:
             fav_name, fav_side, fav_q = home_name, "Home", pinn_home_curr
@@ -391,7 +390,6 @@ def parse_tennisexplorer(html: str) -> dict:
 
 
 def format_quote_snapshot(data: dict, tol: float = 0.05) -> str:
-    """Riepilogo numerico quote: Pinnacle vs retail, apertura vs ora."""
     p = data["pinnacle"]
     r = data["retail"]
 
@@ -474,10 +472,6 @@ def build_tennis_summary(data: dict) -> str:
 # ─────────────────────────────────────────────
 
 def compute_tennis_ratings(data: dict) -> dict:
-    """
-    Calcola rating deterministici X/5 dai dati parsati.
-    Restituisce dict con rating, interpretazioni e segnale finale.
-    """
     p = data["pinnacle"]
     g = data["gap_pinn_vs_retail"]
     pattern = data.get("pattern", {})
@@ -485,7 +479,6 @@ def compute_tennis_ratings(data: dict) -> dict:
 
     results = {}
 
-    # ── 1. OUTLIER + FLUSSO SHARP ──
     outlier_home = p.get("outlier_home", False)
     outlier_away = p.get("outlier_away", False)
 
@@ -514,11 +507,9 @@ def compute_tennis_ratings(data: dict) -> dict:
         "away": outlier_away,
     }
 
-    # ── 2. DRIFT PINNACLE ──
     drift_home = p.get("drift_home") or 0
     drift_away = p.get("drift_away") or 0
 
-    # Determina direzione e intensità
     def drift_rating_single(drift):
         abs_d = abs(drift)
         if abs_d >= 0.10: return 5
@@ -528,7 +519,6 @@ def compute_tennis_ratings(data: dict) -> dict:
         elif abs_d >= 0.01: return 1
         else: return 0
 
-    # Segnale drift: sale su X = PRO Y, scende su X = PRO X
     drift_signals = []
     if abs(drift_home) >= 0.01:
         if drift_home > 0:
@@ -541,18 +531,15 @@ def compute_tennis_ratings(data: dict) -> dict:
         else:
             drift_signals.append(f"Away scende {drift_away:+.2f} → PRO {data['away_name']}")
 
-    # Rating drift = max dei due lati pesato sulla convergenza
     rh = drift_rating_single(drift_home)
     ra = drift_rating_single(drift_away)
 
-    # Se entrambi convergono stesso lato = bonus
     home_pro_away = drift_home > 0.01
     away_pro_home = drift_away > 0.01
     home_pro_home = drift_home < -0.01
     away_pro_away = drift_away < -0.01
 
     if (home_pro_away and away_pro_away) or (home_pro_home and away_pro_home):
-        # Doppia convergenza
         drift_rating = min(5, max(rh, ra) + 1)
         drift_convergence = "doppia convergenza"
     elif drift_signals:
@@ -570,7 +557,6 @@ def compute_tennis_ratings(data: dict) -> dict:
         "convergence": drift_convergence,
     }
 
-    # ── 3. PATTERN ──
     pat_home = pattern.get("home", "FLAT")
     pat_away = pattern.get("away", "FLAT")
 
@@ -586,7 +572,6 @@ def compute_tennis_ratings(data: dict) -> dict:
     pw_away = PATTERN_WEIGHT.get(pat_away, 0)
     pattern_rating = min(5, max(pw_home, pw_away))
 
-    # Interpretazione pattern
     pat_notes = []
     if pat_home == "UNI-":
         pat_notes.append(f"Home UNI- (sale) → PRO {data['away_name']}")
@@ -608,7 +593,6 @@ def compute_tennis_ratings(data: dict) -> dict:
         "notes": pat_notes,
     }
 
-    # ── 4. GAP PINNACLE vs RETAIL ──
     gap_home = g.get("home") or 0
     gap_away = g.get("away") or 0
     max_gap = max(abs(gap_home), abs(gap_away))
@@ -638,7 +622,6 @@ def compute_tennis_ratings(data: dict) -> dict:
         "label": gap_label,
     }
 
-    # ── 5. COMBO (posizione Pinnacle vs retail) ──
     combo_home = combo.get("home", "N/A")
     combo_away = combo.get("away", "N/A")
 
@@ -660,7 +643,6 @@ def compute_tennis_ratings(data: dict) -> dict:
         "away": combo_away,
     }
 
-    # ── TOTALE E SEGNALE FINALE ──
     total = (
         results["outlier"]["rating"] +
         results["drift"]["rating"] +
@@ -678,26 +660,21 @@ def compute_tennis_ratings(data: dict) -> dict:
     else:
         verdict_strength = "❌ DEBOLE"
 
-    # Determina giocatore segnalato (maggioranza segnali)
-    # Conta segnali PRO home vs PRO away
     pro_home_count = 0
     pro_away_count = 0
 
-    # Outlier
     if "PRO" in results["outlier"]["signal"]:
         if "Home" in results["outlier"]["signal"]:
             pro_home_count += results["outlier"]["rating"]
         else:
             pro_away_count += results["outlier"]["rating"]
 
-    # Drift
     for sig in results["drift"]["signals"]:
         if f"PRO {data['home_name']}" in sig:
             pro_home_count += 1
         elif f"PRO {data['away_name']}" in sig:
             pro_away_count += 1
 
-    # Pattern
     for note in results["pattern"]["notes"]:
         if f"PRO {data['home_name']}" in note:
             pro_home_count += 1
@@ -714,7 +691,6 @@ def compute_tennis_ratings(data: dict) -> dict:
         signal_player = "N/D (segnali contraddittori)"
         signal_side = "N/D"
 
-    # Verdetto operativo
     if total >= 13 and (pro_home_count != pro_away_count):
         verdict = "✅ GIOCA"
     elif total >= 8:
@@ -735,7 +711,6 @@ def compute_tennis_ratings(data: dict) -> dict:
 
 
 def format_tennis_ratings(data: dict, ratings: dict) -> str:
-    """Formatta i rating calcolati in testo per il prompt Claude."""
     lines = [
         "=== RATING DETERMINISTICI (calcolati da Python — NON modificare) ===",
         "",
@@ -798,21 +773,10 @@ def ols_simple(xs: list, ys: list) -> tuple:
     return round(a,6), round(b,6), round(r2,4)
 
 def parse_ols_input(text: str) -> dict:
-    """
-    Formato:
-      ols 106 276
-      153 237 550
-      161 220 400
-      ...
-    Prima riga: ols rank_sogg_UTR rank_avv_UTR
-    Righe storiche: quota_sogg*100 quota_avv*100 rank_avv_storico
-    Quote divise per 100. Righe: 5-8.
-    """
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
         return {"error": "Input vuoto"}
 
-    # Prima riga — estrai rank sogg e avv oggi
     first = lines[0]
     nums_first = re.findall(r"\d+\.?\d*", first)
     if len(nums_first) < 2:
@@ -821,10 +785,8 @@ def parse_ols_input(text: str) -> dict:
     rank_subj = float(nums_first[-2])
     rank_opp = float(nums_first[-1])
 
-    # Righe storiche — supporta sia righe separate che trattini
     raw_lines = []
     for line in lines[1:]:
-        # Splitta per trattino se presente
         parts = line.split("-")
         for part in parts:
             part = part.strip()
@@ -846,7 +808,6 @@ def parse_ols_input(text: str) -> dict:
     if len(rows) > 8:
         rows = rows[:8]
 
-    # OLS
     xs, ys = [], []
     for q_s, q_o, rank_a in rows:
         fair_s, _ = no_vig(q_s, q_o)
@@ -880,7 +841,6 @@ def finalize_ols(ols_data: dict, pinnacle_q: float) -> dict:
     elif abs_d < 22: classification = "Moderato"
     else: classification = "Forte"
 
-    # Segnale OLS
     if delta_pct > 0:
         ols_signal = "PRO soggetto (forecast > mercato)"
         ols_rating = 5 if abs_d >= 22 else 4 if abs_d >= 12 else 3 if abs_d >= 5 else 1
@@ -902,7 +862,6 @@ def finalize_ols(ols_data: dict, pinnacle_q: float) -> dict:
 # ─────────────────────────────────────────────
 
 async def claude_call(system: str, user_content, model: str = "claude-haiku-4-5-20251001", max_tokens: int = 2000, timeout: float = 120.0) -> str:
-    """Chiama Claude con system prompt e contenuto utente (testo o lista multimodale)."""
     def _call():
         msgs = [{"role": "user", "content": user_content}]
         return client.messages.create(
@@ -1052,13 +1011,10 @@ async def tennis_quick(state: dict) -> str:
     content_parts = []
     content_parts.append(make_text_block(f"DATA PARTITA: {today}"))
 
-    # Calcola rating deterministici se abbiamo HTML
     if html_data:
         ratings = compute_tennis_ratings(html_data)
-        # Aggiungi OLS se disponibile
         ols_data = state.get("ols_data")
         if ols_data:
-            # Finalizza OLS se non ancora fatto
             if ols_data.get("delta_pct") is None:
                 p = html_data["pinnacle"]
                 hq = p.get("home_curr")
@@ -1097,17 +1053,14 @@ async def tennis_quick(state: dict) -> str:
 
 async def tennis_extended(state: dict) -> str:
     protocol = get_lba_protocol()
-    # Tronca protocollo per evitare timeout — regole operative stanno nei primi 2000 chars
     system = TENNIS_EXTENDED_SYSTEM.format(protocol=protocol[:2000])
     html_data = state.get("html_data")
     today = datetime.now().strftime("%d/%m/%Y")
 
-    # Estesa usa solo quick + ratings — HTML summary già incluso nella quick
     parts = [f"DATA PARTITA: {today}"]
     quick = state.get("last_quick", "")
     if quick:
         parts.append(f"=== QUICK ANALYSIS GIÀ ESEGUITA ===\n{quick}")
-    # Passa anche i rating deterministici se disponibili
     ratings = state.get("last_ratings")
     if ratings and html_data:
         parts.append(format_tennis_ratings(html_data, ratings))
@@ -1119,7 +1072,6 @@ async def tennis_extended(state: dict) -> str:
 
 
 async def tennis_recap(state: dict) -> str:
-    # Usa estesa se disponibile, altrimenti parte dalla quick
     base = state.get("last_extended", "") or state.get("last_quick", "")
     if not base:
         return "❌ Esegui prima la quick analysis (go)."
@@ -1247,7 +1199,6 @@ async def soccer_extended(state: dict) -> str:
     if not quick:
         return "❌ Esegui prima la quick analysis (go)."
 
-    # Estesa usa solo testo — immagine già processata nella quick
     parts = [
         f"DATA PARTITA: {today}",
         f"=== QUICK ANALYSIS GIÀ ESEGUITA ===\n{quick}",
@@ -1266,11 +1217,12 @@ user_state: dict[int, dict] = {}
 def get_state(uid: int) -> dict:
     if uid not in user_state:
         user_state[uid] = {
-            "mode": None,           # "tennis" | "calcio"
-            "html_data": None,      # dati parsati HTML tennis
-            "screenshots": [],      # lista di (b64, mime)
+            "mode": None,
+            "html_data": None,
+            "screenshots": [],
             "last_quick": "",
             "last_extended": "",
+            "programme": [],       # lista match del giorno
         }
     return user_state[uid]
 
@@ -1281,6 +1233,7 @@ def reset_state(uid: int):
         "screenshots": [],
         "last_quick": "",
         "last_extended": "",
+        "programme": [],
     }
 
 
@@ -1290,20 +1243,24 @@ def reset_state(uid: int):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Multi-Sport Bet Analyzer v4.0*\n\n"
+        "🤖 <b>Multi-Sport Bet Analyzer v5.0</b>\n\n"
         "Comandi:\n"
         "• /tennis — avvia modalità tennis\n"
         "• /calcio — avvia modalità calcio\n"
+        "• /programma — programma tennis del giorno\n"
+        "• /analizza [N] — analizza match N dal programma\n"
         "• /analisi — analisi estesa (dopo go)\n"
         "• /recap — recap Telegram (solo tennis)\n"
         "• /protocollo lba — leggi protocollo LBA\n"
         "• /protocollo soccer — leggi protocollo Soccer\n"
         "• /reset — azzera stato\n\n"
-        "Workflow:\n"
+        "Workflow automatico:\n"
+        "Ogni mattina alle 8:00 ricevi il programma del giorno.\n\n"
+        "Workflow manuale:\n"
         "1️⃣ Scegli /tennis o /calcio\n"
         "2️⃣ Carica file/screenshot\n"
-        "3️⃣ Scrivi *go* per la quick analysis",
-        parse_mode="Markdown"
+        "3️⃣ Scrivi <b>go</b> per la quick analysis",
+        parse_mode="HTML"
     )
 
 
@@ -1312,12 +1269,12 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset_state(uid)
     get_state(uid)["mode"] = "tennis"
     await update.message.reply_text(
-        "🎾 *Modalità TENNIS attiva*\n\n"
+        "🎾 <b>Modalità TENNIS attiva</b>\n\n"
         "Carica in qualsiasi ordine:\n"
         "• Screenshot AsianOdds (Moneyline + opzionale AH)\n"
         "• File HTML TennisExplorer\n\n"
-        "Poi scrivi *go* per la quick analysis.",
-        parse_mode="Markdown"
+        "Poi scrivi <b>go</b> per la quick analysis.",
+        parse_mode="HTML"
     )
 
 
@@ -1326,11 +1283,103 @@ async def cmd_calcio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset_state(uid)
     get_state(uid)["mode"] = "calcio"
     await update.message.reply_text(
-        "⚽ *Modalità CALCIO attiva*\n\n"
+        "⚽ <b>Modalità CALCIO attiva</b>\n\n"
         "Carica la screenshot TOS (MATCH_ODDS + OVER_UNDER).\n\n"
-        "Poi scrivi *go* per la quick analysis.",
-        parse_mode="Markdown"
+        "Poi scrivi <b>go</b> per la quick analysis.",
+        parse_mode="HTML"
     )
+
+
+async def cmd_programma(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text("⏳ Recupero programma da TennisExplorer...")
+    try:
+        matches = await scrape_programme()
+        # Filtra quota minima FAV >= 1.36 — verrà applicato dopo scraping quote
+        # Per ora salva tutto e mostra la lista
+        get_state(uid)["programme"] = matches
+        msg = format_programme_telegram(matches)
+        for chunk in split_message(msg):
+            await update.message.reply_text(chunk, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"cmd_programma error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Errore: {str(e)[:300]}")
+
+
+async def cmd_analizza(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /analizza [N] — scarica HTML quote del match N e avvia analisi tennis.
+    """
+    uid = update.effective_user.id
+    state = get_state(uid)
+    args = context.args
+
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Uso: /analizza [numero] — es: /analizza 3")
+        return
+
+    idx = int(args[0]) - 1
+    programme = state.get("programme", [])
+
+    if not programme:
+        await update.message.reply_text("❌ Nessun programma caricato. Esegui prima /programma.")
+        return
+
+    if idx < 0 or idx >= len(programme):
+        await update.message.reply_text(f"❌ Numero non valido. Scegli tra 1 e {len(programme)}.")
+        return
+
+    match = programme[idx]
+    if not match.get("te_url"):
+        await update.message.reply_text("❌ URL match non disponibile per questo match.")
+        return
+
+    await update.message.reply_text(
+        f"⏳ Scarico quote per <b>{match['home']} vs {match['away']}</b>...",
+        parse_mode="HTML"
+    )
+
+    try:
+        html = await scrape_match_html(match["te_url"])
+        if not html:
+            await update.message.reply_text("❌ Impossibile scaricare le quote. Riprova o carica l'HTML manualmente.")
+            return
+
+        data = parse_tennisexplorer(html)
+        if "error" in data:
+            await update.message.reply_text(f"❌ Errore parsing: {data['error']}")
+            return
+
+        # Filtro quota minima FAV 1.36
+        fav_q = data.get("fav_q")
+        if fav_q and fav_q < 1.36:
+            await update.message.reply_text(
+                f"⚠️ Match scartato: FAV @ {fav_q} — sotto soglia minima 1.36."
+            )
+            return
+
+        # Imposta stato tennis con i dati
+        reset_state(uid)
+        state = get_state(uid)
+        state["mode"] = "tennis"
+        state["html_data"] = data
+        state["programme"] = programme  # mantieni il programma
+
+        snapshot = format_quote_snapshot(data)
+        torneo = " | ".join(filter(None, [
+            data.get("match_tournament",""), data.get("match_round",""), data.get("match_surface","")
+        ]))
+        msg = (
+            f"✅ <b>{data['home_name']} vs {data['away_name']}</b>\n"
+            f"🏆 {torneo or 'N/D'}\n\n"
+            f"<code>{snapshot}</code>\n\n"
+            "Scrivi <b>go</b> per la quick analysis, oppure aggiungi screenshot AsianOdds."
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"cmd_analizza error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Errore: {str(e)[:300]}")
 
 
 async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1356,13 +1405,12 @@ async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏱ Timeout analisi. Riprova con /analisi.")
         return
     except Exception as e:
-        logger.error(f"tennis_extended error: {e}", exc_info=True)
+        logger.error(f"extended error: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Errore analisi estesa: {str(e)[:300]}")
         return
 
     state["last_extended"] = result
 
-    # Telegram ha limite 4096 chars — splitta se necessario
     for chunk in split_message(result):
         try:
             await update.message.reply_text(chunk, parse_mode="HTML")
@@ -1384,7 +1432,7 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(result, parse_mode="HTML")
     except Exception:
-        await update.message.reply_text(result, parse_mode="HTML")
+        await update.message.reply_text(result)
 
 
 async def cmd_protocollo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1412,7 +1460,7 @@ async def cmd_protocollo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text(chunk, parse_mode="HTML")
         except Exception:
-            await update.message.reply_text(chunk, parse_mode="HTML")
+            await update.message.reply_text(chunk)
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1422,9 +1470,41 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_aggiorna_protocolli(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Forza ricaricamento protocolli da Drive (svuota cache)."""
     clear_protocol_cache()
     await update.message.reply_text("🔄 Cache protocolli svuotata. Prossima analisi rileggerà da Drive.")
+
+
+# ─────────────────────────────────────────────
+# SCHEDULER — invio automatico mattutino
+# ─────────────────────────────────────────────
+
+async def job_programma_mattutino(application):
+    """Job schedulato: invia programma del giorno alle 8:00."""
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        logger.warning("TELEGRAM_CHAT_ID non impostato — skip job mattutino")
+        return
+
+    logger.info("Job mattutino: avvio scraping programma...")
+    try:
+        matches = await scrape_programme()
+        msg = format_programme_telegram(matches)
+        for chunk in split_message(msg):
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode="HTML"
+            )
+        logger.info(f"Job mattutino completato: {len(matches)} match inviati")
+    except Exception as e:
+        logger.error(f"Job mattutino error: {e}", exc_info=True)
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Errore job mattutino: {str(e)[:200]}"
+            )
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────
@@ -1491,14 +1571,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "tennis":
         await update.message.reply_text(
             f"✅ Screenshot #{n} caricata (AsianOdds).\n"
-            "Puoi aggiungere altre screenshot o HTML, oppure scrivi *go*.",
-            parse_mode="Markdown"
+            "Puoi aggiungere altre screenshot o HTML, oppure scrivi <b>go</b>.",
+            parse_mode="HTML"
         )
     else:
         await update.message.reply_text(
             f"✅ Screenshot #{n} caricata (TOS).\n"
-            "Puoi aggiungere altre screenshot oppure scrivi *go*.",
-            parse_mode="Markdown"
+            "Puoi aggiungere altre screenshot oppure scrivi <b>go</b>.",
+            parse_mode="HTML"
         )
 
 
@@ -1530,7 +1610,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text(result, parse_mode="HTML")
         except Exception:
-            await update.message.reply_text(result, parse_mode="HTML")
+            await update.message.reply_text(result)
 
         await update.message.reply_text(
             "Comandi disponibili:\n"
@@ -1540,7 +1620,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Input OLS: prima riga inizia con "ols"
     if text.lower().startswith("ols"):
         if state.get("mode") != "tennis":
             await update.message.reply_text("❌ OLS disponibile solo in modalità /tennis.")
@@ -1549,7 +1628,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "error" in ols_result:
             await update.message.reply_text(f"❌ OLS: {ols_result['error']}")
             return
-        # Finalizza con quota Pinnacle del favorito se HTML già caricato
         html_data = state.get("html_data")
         if html_data:
             p = html_data["pinnacle"]
@@ -1558,13 +1636,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pinn_fav = min(hq, aq) if hq and aq else hq or aq
             ols_result = finalize_ols(ols_result, pinn_fav)
         state["ols_data"] = ols_result
-        delta_str = f"Δ%={ols_result['delta_pct']:+.1f}% ({ols_result['classification']}) | {ols_result['signal']}" if ols_result.get("delta_pct") is not None else "Δ% calcolato al go"
+        delta_str_val = f"Δ%={ols_result['delta_pct']:+.1f}% ({ols_result['classification']}) | {ols_result['signal']}" if ols_result.get("delta_pct") is not None else "Δ% calcolato al go"
         active_str = "✅ ATTIVO" if ols_result.get("active") else "⚠️ R²<0.60 o sub-threshold"
         await update.message.reply_text(
             f"✅ OLS caricato — {len(ols_result['rows'])} partite storiche\n"
             f"Rank: sogg={ols_result['rank_subj']} avv={ols_result['rank_opp']}\n"
             f"Forecast: {ols_result['forecast']:.3f} | R²={ols_result['r2']:.3f}\n"
-            f"{delta_str}\n"
+            f"{delta_str_val}\n"
             f"Layer OLS: {active_str}\n\n"
             "Scrivi go per analisi completa."
         )
@@ -1574,6 +1652,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Comandi disponibili:\n"
         "• /tennis — modalità tennis\n"
         "• /calcio — modalità calcio\n"
+        "• /programma — programma del giorno\n"
+        "• /analizza [N] — analizza match N\n"
         "• go — avvia analisi\n"
         "• /analisi — analisi estesa\n"
         "• /recap — recap Telegram (tennis)\n"
@@ -1587,7 +1667,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 
 def split_message(text: str, limit: int = 4000) -> list[str]:
-    """Splitta testo lungo in chunks per Telegram."""
     if len(text) <= limit:
         return [text]
     chunks = []
@@ -1608,7 +1687,6 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
 # ─────────────────────────────────────────────
 
 def main():
-    # Pre-carica protocolli in cache all'avvio — evita latenza alla prima richiesta
     logger.info("Pre-caricamento protocolli da Drive...")
     try:
         lba = get_lba_protocol()
@@ -1623,9 +1701,23 @@ def main():
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Scheduler job mattutino
+    scheduler = AsyncIOScheduler(timezone="Europe/Rome")
+    scheduler.add_job(
+        job_programma_mattutino,
+        trigger="cron",
+        hour=8,
+        minute=0,
+        args=[app]
+    )
+    scheduler.start()
+    logger.info("Scheduler avviato — job mattutino alle 08:00 Europe/Rome")
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("tennis", cmd_tennis))
     app.add_handler(CommandHandler("calcio", cmd_calcio))
+    app.add_handler(CommandHandler("programma", cmd_programma))
+    app.add_handler(CommandHandler("analizza", cmd_analizza))
     app.add_handler(CommandHandler("analisi", cmd_analisi))
     app.add_handler(CommandHandler("recap", cmd_recap))
     app.add_handler(CommandHandler("protocollo", cmd_protocollo))
@@ -1636,7 +1728,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot v4.0 avviato")
+    logger.info("Bot v5.0 avviato")
     app.run_polling()
 
 

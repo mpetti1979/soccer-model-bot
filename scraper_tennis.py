@@ -51,11 +51,11 @@ URL_PROGRAMME = "https://www.tennisexplorer.com/matches/"
 def _is_allowed_circuit(t: str) -> bool:
     if not t: return True
     t = t.lower()
+    # Escludi solo circuiti esplicitamente bloccati
     for b in BLOCKED_CIRCUITS:
         if b in t: return False
-    for a in ALLOWED_CIRCUITS:
-        if a in t: return True
-    return False
+    # Includi tutto il resto (ATP, WTA, Challenger, ITF, slam, ecc.)
+    return True
 
 
 def _parse_surface(txt: str) -> tuple:

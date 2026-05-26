@@ -4,3 +4,6 @@ beautifulsoup4
 gspread
 google-auth
 google-api-python-client
+playwright==1.44.0
+apscheduler==3.10.4
+httpx

@@ -6,10 +6,33 @@ Playwright headless — compatibile Railway
 
 import re
 import logging
+import subprocess
+import sys
 from datetime import datetime
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 logger = logging.getLogger(__name__)
+
+# Installa Chromium al primo import se non presente
+def _ensure_chromium():
+    import os
+    chromium_path = os.path.expanduser("~/.cache/ms-playwright/chromium-1117/chrome-linux/chrome")
+    if not os.path.exists(chromium_path):
+        logger.info("Chromium non trovato — installazione in corso...")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True, capture_output=True
+            )
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+                check=True, capture_output=True
+            )
+            logger.info("Chromium installato con successo")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Errore installazione Chromium: {e.stderr.decode()}")
+
+_ensure_chromium()
 
 # Circuit whitelist (case-insensitive match)
 ALLOWED_CIRCUITS = ["atp", "wta", "challenger", "itf"]
@@ -71,7 +94,6 @@ async def scrape_programme() -> list[dict]:
             await browser.close()
             return []
 
-        # Estrai tutte le righe della tabella matches
         rows = await page.query_selector_all("table.result tr")
 
         current_tournament = ""
@@ -81,13 +103,11 @@ async def scrape_programme() -> list[dict]:
         for row in rows:
             cls = await row.get_attribute("class") or ""
 
-            # Riga torneo/header
             if "head" in cls or "tournament" in cls:
                 cells = await row.query_selector_all("td")
                 if cells:
                     txt = await cells[0].inner_text()
                     txt = txt.strip()
-                    # Estrai superficie se presente tra parentesi
                     surface_match = re.search(r"\(([^)]+)\)\s*$", txt)
                     if surface_match:
                         surf_raw = surface_match.group(1).lower()
@@ -107,21 +127,16 @@ async def scrape_programme() -> list[dict]:
                         current_surface = ""
                 continue
 
-            # Riga match
             if "one" in cls or "two" in cls or "bott" in cls or cls == "" or "r1" in cls or "r2" in cls:
                 cells = await row.query_selector_all("td")
                 if len(cells) < 3:
                     continue
 
-                # Cella orario (prima cella)
                 time_text = await cells[0].inner_text()
                 time_text = time_text.strip()
                 if re.match(r"\d{2}:\d{2}", time_text):
                     current_time = time_text
 
-                # Cella giocatori
-                # TennisExplorer struttura: ora | home | score/vs | away
-                # Cerca link giocatori
                 player_links = await row.query_selector_all("a.t-name, a[href*='/player/']")
                 if len(player_links) < 2:
                     continue
@@ -129,7 +144,6 @@ async def scrape_programme() -> list[dict]:
                 home_name = (await player_links[0].inner_text()).strip()
                 away_name = (await player_links[1].inner_text()).strip()
 
-                # URL match
                 match_link = await row.query_selector("a[href*='/match/']")
                 te_url = ""
                 if match_link:
@@ -140,7 +154,6 @@ async def scrape_programme() -> list[dict]:
                 if not home_name or not away_name:
                     continue
 
-                # Filtro circuito
                 if not _is_allowed_circuit(current_tournament):
                     continue
 
@@ -162,13 +175,10 @@ async def scrape_programme() -> list[dict]:
 async def scrape_match_html(te_url: str) -> str:
     """
     Scarica l'HTML della pagina quote di un match specifico su TennisExplorer.
-    Restituisce l'HTML grezzo (da passare a parse_tennisexplorer).
     """
     if not te_url:
         return ""
 
-    # Converti URL match → URL odds
-    # es: /match/2024/05/26/djokovic-alcaraz/  → /match/.../odds/
     odds_url = te_url.rstrip("/") + "/odds/"
 
     async with async_playwright() as p:
@@ -210,9 +220,6 @@ async def scrape_match_html(te_url: str) -> str:
 
 
 def format_programme_telegram(matches: list[dict]) -> str:
-    """
-    Formatta la lista match per Telegram.
-    """
     if not matches:
         return "❌ Nessun match trovato per oggi nei circuiti selezionati."
 

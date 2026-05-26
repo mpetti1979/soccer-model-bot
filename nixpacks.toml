@@ -1,5 +1,2 @@
-[phases.setup]
-nixPkgs = ["chromium", "chromium-driver"]
-
 [phases.install]
-cmds = ["pip install -r requirements.txt", "playwright install chromium"]
+cmds = ["pip install -r requirements.txt", "python -m playwright install chromium", "python -m playwright install-deps chromium"]

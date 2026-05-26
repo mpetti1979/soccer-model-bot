@@ -1687,35 +1687,6 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
 # ─────────────────────────────────────────────
 
 
-async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Debug: scarica HTML grezzo TennisExplorer e mostra struttura."""
-    from scraper_tennis import debug_page_html
-    await update.message.reply_text("⏳ Scarico HTML TennisExplorer per debug...")
-    try:
-        html = await debug_page_html()
-        # Cerca pattern chiave nell'HTML
-        import re
-        # Trova classi delle tr
-        tr_classes = re.findall(r'<tr[^>]*class=["']([^"']+)["']', html)
-        unique_classes = list(dict.fromkeys(tr_classes))[:30]
-        # Trova primi link /player/
-        player_links = re.findall(r'href=["']([^"']*player[^"']*)["']', html)[:10]
-        # Trova primi link /match/
-        match_links = re.findall(r'href=["']([^"']*match[^"']*)["']', html)[:5]
-        # Cerca table id/class
-        tables = re.findall(r'<table[^>]*>', html)[:10]
-
-        msg = (
-            f"HTML lunghezza: {len(html)}\n\n"
-            f"TR classi trovate ({len(unique_classes)}):\n" + "\n".join(unique_classes[:20]) + "\n\n"
-            f"Link /player/ trovati: {len(player_links)}\n" + "\n".join(player_links[:5]) + "\n\n"
-            f"Link /match/ trovati: {len(match_links)}\n" + "\n".join(match_links[:5]) + "\n\n"
-            f"Tabelle HTML:\n" + "\n".join(tables[:5])
-        )
-        for chunk in split_message(msg):
-            await update.message.reply_text(chunk)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Errore debug: {str(e)[:300]}")
 
 def main():
     logger.info("Pre-caricamento protocolli da Drive...")
@@ -1754,7 +1725,6 @@ def main():
     app.add_handler(CommandHandler("protocollo", cmd_protocollo))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("aggiorna", cmd_aggiorna_protocolli))
-    app.add_handler(CommandHandler("debug", cmd_debug))
 
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

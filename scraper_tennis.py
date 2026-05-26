@@ -1,5 +1,11 @@
 """
-scraper_tennis.py v4 — debug chirurgico struttura righe
+scraper_tennis.py v5 — parser corretto: home e away su righe separate
+Struttura TennisExplorer:
+  TR class="head flags"     → torneo
+  TR class="one fRow bott"  → home player + orario
+  TR class="one"            → away player
+  TR class="two fRow bott"  → home player + orario (match successivo)
+  TR class="two"            → away player
 """
 
 import re
@@ -100,34 +106,85 @@ async def scrape_programme() -> list:
             rows = await page.query_selector_all("table.result tr")
             logger.info(f"Righe table.result: {len(rows)}")
 
-            # DEBUG: analizza prime 6 righe match (one/two) in dettaglio
-            debug_count = 0
+            current_tournament = ""
+            current_surface = ""
+            current_time = ""
+            pending_home = None  # nome giocatore home in attesa dell'away
+            pending_time = ""
+            pending_url = ""
+
             for row in rows:
                 cls = await row.get_attribute("class") or ""
-                if ("one" in cls or "two" in cls) and debug_count < 6:
-                    # Conta link player
-                    plinks = await row.query_selector_all("a[href*='/player/']")
-                    # Conta link match
-                    mlinks = await row.query_selector_all("a[href*='/match/']")
-                    # Tutti i link
-                    all_links = await row.query_selector_all("a")
-                    # Testo celle
-                    cells = await row.query_selector_all("td")
-                    cell_texts = []
-                    for c in cells[:5]:
-                        cell_texts.append((await c.inner_text()).strip()[:30])
-                    # innerHTML prima cella con link
-                    first_link_href = ""
-                    first_link_text = ""
-                    if all_links:
-                        first_link_href = await all_links[0].get_attribute("href") or ""
-                        first_link_text = (await all_links[0].inner_text()).strip()
-                    logger.info(f"ROW cls={cls!r} | player_links={len(plinks)} match_links={len(mlinks)} all_links={len(all_links)} | cells={cell_texts} | first_link={first_link_href!r} text={first_link_text!r}")
-                    debug_count += 1
 
+                # ── Riga torneo ──
+                if "head" in cls:
+                    link = await row.query_selector("a")
+                    if link:
+                        txt = (await link.inner_text()).strip()
+                    else:
+                        cells = await row.query_selector_all("td")
+                        txt = (await cells[0].inner_text()).strip() if cells else ""
+                    if txt:
+                        current_tournament, current_surface = _parse_surface(txt)
+                    pending_home = None
+                    continue
+
+                # ── Riga home (fRow = first row del match) ──
+                if "fRow" in cls:
+                    pending_home = None  # reset match precedente incompleto
+                    player_link = await row.query_selector("a[href*='/player/']")
+                    if not player_link:
+                        continue
+                    pending_home = (await player_link.inner_text()).strip()
+
+                    # Orario: prima cella
+                    cells = await row.query_selector_all("td")
+                    pending_time = ""
+                    for cell in cells[:3]:
+                        t2 = (await cell.inner_text()).strip()
+                        if re.match(r"\d{1,2}:\d{2}", t2):
+                            pending_time = t2
+                            break
+
+                    # URL match (secondo link spesso)
+                    all_links = await row.query_selector_all("a")
+                    pending_url = ""
+                    for lnk in all_links:
+                        href = await lnk.get_attribute("href") or ""
+                        if "/match/" in href:
+                            pending_url = f"https://www.tennisexplorer.com{href}" if href.startswith("/") else href
+                            break
+                    continue
+
+                # ── Riga away (riga successiva senza fRow) ──
+                if ("one" in cls or "two" in cls) and "fRow" not in cls and pending_home:
+                    player_link = await row.query_selector("a[href*='/player/']")
+                    if not player_link:
+                        pending_home = None
+                        continue
+                    away = (await player_link.inner_text()).strip()
+
+                    if not _is_allowed_circuit(current_tournament):
+                        pending_home = None
+                        continue
+
+                    matches.append({
+                        "home": pending_home,
+                        "away": away,
+                        "tournament": current_tournament,
+                        "surface": current_surface,
+                        "time": pending_time,
+                        "te_url": pending_url,
+                    })
+                    pending_home = None
+                    continue
+
+            logger.info(f"Match trovati: {len(matches)}")
             await browser.close()
             await p.stop()
-            return []  # per ora ritorna vuoto, vogliamo solo il debug
+            if matches:
+                return matches
+            return []
 
         except Exception as e:
             logger.error(f"Errore: {e}")
@@ -163,9 +220,13 @@ async def scrape_match_html(te_url: str) -> str:
 
 def format_programme_telegram(matches: list) -> str:
     if not matches:
-        return "Debug in corso — controlla i log Railway."
+        return "Nessun match trovato per oggi nei circuiti selezionati."
     today = datetime.now().strftime("%d/%m/%Y")
-    lines = [f"<b>PROGRAMMA — {today}</b>", f"<i>{len(matches)} match</i>", ""]
+    lines = [
+        f"<b>PROGRAMMA TENNIS — {today}</b>",
+        f"<i>{len(matches)} match | ATP · WTA · Challenger · ITF</i>",
+        "",
+    ]
     current_tournament = ""
     for i, m in enumerate(matches, 1):
         if m["tournament"] != current_tournament:
@@ -174,5 +235,6 @@ def format_programme_telegram(matches: list) -> str:
             lines.append(f"\n<b>{current_tournament}{surf}</b>")
         time_str = f"  {m['time']}" if m["time"] else ""
         lines.append(f"{i}. {m['home']} vs {m['away']}{time_str}")
-    lines.append("\nUsa /analizza [numero] per analizzare un match.")
+    lines.append("")
+    lines.append("Usa /analizza [numero] per analizzare un match.")
     return "\n".join(lines)
